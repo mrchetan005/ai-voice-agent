@@ -1,0 +1,47 @@
+[project]
+name = "voiceagent"
+version = "0.1.0"
+description = "Provider-agnostic realtime voice proxy: plug any orchestration agent into a voice interface in a few lines."
+readme = "README.md"
+authors = [
+    { name = "Chetan", email = "mr.chetan005@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "websockets>=12",
+]
+
+[project.optional-dependencies]
+local = ["sounddevice>=0.5"]
+langchain = ["langchain-core>=0.3"]
+crewai = ["crewai>=1.15"]
+booking = [
+    "langgraph>=0.2",
+    "langgraph-checkpoint-postgres>=2.0",
+    "psycopg[binary]>=3.2",
+    "langchain-google-genai>=2.0",
+    "aiortc>=1.9",
+    "aiohttp>=3.10",
+]
+
+[project.scripts]
+appointment-booker = "appointment_booker.main:cli"
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B", "SIM", "DTZ", "RUF", "FURB"]
+# BLE001 ignored: broad `except Exception` in the live call path is by
+# design — a failed tool call or persist must never drop a phone call.
+# Every such catch logs.
+ignore = ["BLE001"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/voiceagent", "src/appointment_booker"]

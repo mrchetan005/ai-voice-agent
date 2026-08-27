@@ -1,0 +1,21 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets — never commit real env files; the template stays tracked
+.env
+.env.*
+!.env.example
+
+# Tooling caches
+.serena/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
