@@ -1,0 +1,13 @@
+.venv/
+.git/
+.serena/
+.env
+.env.*
+__pycache__/
+*.py[oc]
+dist/
+build/
+tests/
+examples/
+*.md
+!README.md
