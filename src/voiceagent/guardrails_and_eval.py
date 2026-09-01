@@ -190,9 +190,10 @@ class TelemetryRecorder:
     _BUCKETS: ClassVar[dict[str, str]] = {
         "asr_latency": "asr_latency_ms",
         "llm_ttfb": "llm_ttfb_ms",
-        "agent.turn": "llm_ttfb_ms",  # agent turn time doubles as TTFB proxy
+        "agent.turn": "agent_turn_ms",
         "tts_first_byte": "tts_first_byte_ms",
         "network_rtt": "network_rtt_ms",
+        "e2e_response": "e2e_response_ms",
     }
 
     def __init__(self, session_id: str, emit_logs: bool = True) -> None:

@@ -82,7 +82,9 @@ _CLIENT_OVERRIDABLE = {"language", "tone", "voice_id", "system_prompt"}
 _LLM_PRESETS: dict[str, dict[str, str]] = {
     "groq": {
         "llm_base_url": "https://api.groq.com/openai/v1",
-        "llm_model": "llama-3.3-70b-versatile",
+        # llama-3.3-70b-versatile was retired from Groq (404s now);
+        # gpt-oss-20b is small/fast and gets reasoning_effort=low forced.
+        "llm_model": "openai/gpt-oss-20b",
         "llm_api_key_env": "GROQ_API_KEY",
     },
     "openai": {
@@ -208,7 +210,11 @@ class VoiceAgent:
         if isinstance(proxy, SplitStackProxy):
             # No agent supplied -> plain streaming LLM chat over the stack's
             # own LLM router. Swap in your orchestrator whenever it's ready.
-            return make_llm_agent(proxy.llm)
+            def record_ttfb(ms: float) -> None:
+                if proxy.telemetry is not None:
+                    proxy.telemetry.record("llm_ttfb", ms)
+
+            return make_llm_agent(proxy.llm, on_first_token=record_ttfb)
         if isinstance(proxy, MockProxy):
             async def echo(ctx: AgentContext) -> str:
                 return f"You said: {ctx.text}"

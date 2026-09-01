@@ -106,6 +106,11 @@ async def main() -> int:
               f"in {len(transport.sent_frames)} frames")
         check("model relayed the agent's answer",
               "tomorrow" in speech.lower() or transport.audio_ms_received > 500)
+        print(f"  usage: {proxy.usage}")
+        check("usageMetadata captured (token accounting works)",
+              proxy.usage["total_tokens"] > 0)
+        check("audio-out seconds counted",
+              proxy.usage["audio_out_seconds"] > 0)
     except Exception as exc:
         print(f"  ERROR: {exc!r}")
         failures.append(str(exc))

@@ -274,6 +274,16 @@ class GeminiLiveProxy(BaseVoiceAgentProxy):
         self._input_transcript: list[str] = []
         self._output_transcript: list[str] = []
         self._tool_tasks: set[asyncio.Task[None]] = set()
+        # Neutral per-session usage counters (survive goAway reconnects).
+        # Token counts come from the API's usageMetadata; audio seconds are
+        # counted from PCM bytes as an independent billing cross-check.
+        self.usage: dict[str, float] = {
+            "prompt_tokens": 0.0, "prompt_tokens_text": 0.0,
+            "prompt_tokens_audio": 0.0, "response_tokens": 0.0,
+            "response_tokens_text": 0.0, "response_tokens_audio": 0.0,
+            "total_tokens": 0.0, "audio_in_seconds": 0.0,
+            "audio_out_seconds": 0.0, "turns": 0.0,
+        }
 
     def _setup_message(self) -> dict[str, Any]:
         if self._native_tools:
@@ -341,6 +351,9 @@ class GeminiLiveProxy(BaseVoiceAgentProxy):
 
     async def _uplink_loop(self) -> None:
         async for frame in self.transport.recv_frames():
+            self.usage["audio_in_seconds"] += len(frame.data) / (
+                self.config.input_sample_rate * 2
+            )
             with contextlib.suppress(websockets.ConnectionClosed):
                 await self._ws.send(json.dumps({
                     "realtimeInput": {
@@ -373,6 +386,12 @@ class GeminiLiveProxy(BaseVoiceAgentProxy):
             await self._connect()
 
     async def _handle_message(self, msg: dict[str, Any]) -> None:
+        # usageMetadata rides as a top-level sibling of serverContent, and
+        # the interrupted branch below returns early — so this check must
+        # be non-exclusive and come first.
+        if (usage_meta := msg.get("usageMetadata")) is not None:
+            self._accumulate_usage(usage_meta)
+
         if (content := msg.get("serverContent")) is not None:
             if content.get("interrupted"):
                 # Server-driven barge-in: generationComplete will NOT arrive
@@ -395,8 +414,13 @@ class GeminiLiveProxy(BaseVoiceAgentProxy):
                 inline = part.get("inlineData")
                 if inline and inline.get("data"):
                     self.set_state(SessionState.SPEAKING)
-                    self.enqueue_audio(base64.b64decode(inline["data"]))
+                    pcm = base64.b64decode(inline["data"])
+                    self.usage["audio_out_seconds"] += len(pcm) / (
+                        self.config.output_sample_rate * 2
+                    )
+                    self.enqueue_audio(pcm)
             if content.get("turnComplete"):
+                self.usage["turns"] += 1
                 self.set_state(SessionState.LISTENING)
                 # The model replying marks the end of the user utterance.
                 # Normal turns reach the agent via send_to_agent; the flush
@@ -426,6 +450,24 @@ class GeminiLiveProxy(BaseVoiceAgentProxy):
         elif (update := msg.get("sessionResumptionUpdate")) is not None:
             if update.get("resumable") and update.get("newHandle"):
                 self._resume_handle = update["newHandle"]
+
+    def _accumulate_usage(self, meta: dict[str, Any]) -> None:
+        """Sum a usageMetadata message into self.usage. Metering must never
+        break the audio path, so any surprise shape is logged and ignored."""
+        try:
+            self.usage["prompt_tokens"] += meta.get("promptTokenCount", 0) or 0
+            self.usage["response_tokens"] += meta.get("responseTokenCount", 0) or 0
+            self.usage["total_tokens"] += meta.get("totalTokenCount", 0) or 0
+            for details_key, prefix in (
+                ("promptTokensDetails", "prompt_tokens"),
+                ("responseTokensDetails", "response_tokens"),
+            ):
+                for detail in meta.get(details_key) or []:
+                    modality = str(detail.get("modality", "")).lower()
+                    if modality in ("text", "audio"):
+                        self.usage[f"{prefix}_{modality}"] += detail.get("tokenCount", 0) or 0
+        except Exception as exc:
+            logger.debug("usageMetadata parse skipped: %r", exc)
 
     async def _flush_transcripts(self) -> None:
         """Emit aggregated turn transcripts to log + optional callback."""
@@ -518,6 +560,9 @@ class DeepgramClassicASR:
             "sample_rate": str(sample_rate),
             "interim_results": "true",
             "endpointing": str(options.get("endpointing_ms", 100)),
+            # Without this param Deepgram never emits UtteranceEnd, leaving
+            # the noisy-line fallback in events() dead.
+            "utterance_end_ms": str(options.get("utterance_end_ms", 1000)),
             "vad_events": "true",
             "smart_format": "true",
         }
@@ -525,6 +570,8 @@ class DeepgramClassicASR:
         self._url = f"wss://api.deepgram.com/v1/listen?{query}"
         self._ws: Any = None
         self._keepalive: asyncio.Task[None] | None = None
+        self._sample_rate = sample_rate
+        self.audio_seconds_sent: float = 0.0
 
     async def connect(self) -> None:
         self._ws = await websockets.connect(
@@ -542,6 +589,7 @@ class DeepgramClassicASR:
                 await self._ws.send(json.dumps({"type": "KeepAlive"}))
 
     async def send_audio(self, pcm: bytes) -> None:
+        self.audio_seconds_sent += len(pcm) / (self._sample_rate * 2)
         await self._ws.send(pcm)  # raw binary in — zero re-encoding
 
     async def events(self) -> AsyncIterator[tuple[str, str | None]]:
@@ -603,6 +651,8 @@ class DeepgramFluxASR:
             query += f"&language_hint={lang}"
         self._url = f"wss://api.deepgram.com/v2/listen?{query}"
         self._ws: Any = None
+        self._sample_rate = sample_rate
+        self.audio_seconds_sent: float = 0.0
 
     async def connect(self) -> None:
         self._ws = await websockets.connect(
@@ -611,6 +661,7 @@ class DeepgramFluxASR:
         )
 
     async def send_audio(self, pcm: bytes) -> None:
+        self.audio_seconds_sent += len(pcm) / (self._sample_rate * 2)
         await self._ws.send(pcm)
 
     async def events(self) -> AsyncIterator[tuple[str, str | None]]:
@@ -650,13 +701,14 @@ class OpenAICompatLLM:
 
     def __init__(self, options: dict[str, Any]) -> None:
         self.base_url: str = options.get("llm_base_url", "https://api.groq.com/openai/v1")
-        self.model: str = options.get("llm_model", "llama-3.3-70b-versatile")
+        self.model: str = options.get("llm_model", "openai/gpt-oss-20b")
         self._key_env: str = options.get("llm_api_key_env", "GROQ_API_KEY")
         self._extra: dict[str, Any] = dict(options.get("llm_extra", {}))
         # gpt-oss reasoning models: force low effort for voice TTFB.
         if "gpt-oss" in self.model and "reasoning_effort" not in self._extra:
             self._extra["reasoning_effort"] = "low"
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0))
+        self.usage: dict[str, float] = {"input_tokens": 0.0, "output_tokens": 0.0}
 
     async def stream(
         self,
@@ -667,6 +719,9 @@ class OpenAICompatLLM:
             "model": self.model,
             "messages": messages,
             "stream": True,
+            # Ask for the final usage chunk (Groq also mirrors it under
+            # x_groq); it arrives with choices == [] — guard the index.
+            "stream_options": {"include_usage": True},
             **self._extra,
         }
         started = time.monotonic()
@@ -684,11 +739,12 @@ class OpenAICompatLLM:
                 data = line[6:]
                 if data == "[DONE]":
                     return
-                delta = (
-                    json.loads(data).get("choices", [{}])[0]
-                    .get("delta", {})
-                    .get("content")
-                )
+                obj = json.loads(data)
+                if usage := (obj.get("usage") or (obj.get("x_groq") or {}).get("usage")):
+                    self.usage["input_tokens"] += usage.get("prompt_tokens", 0) or 0
+                    self.usage["output_tokens"] += usage.get("completion_tokens", 0) or 0
+                choices = obj.get("choices") or []
+                delta = choices[0].get("delta", {}).get("content") if choices else None
                 if delta:
                     if first and on_first_token is not None:
                         on_first_token((time.monotonic() - started) * 1000.0)
@@ -699,7 +755,10 @@ class OpenAICompatLLM:
         await self._client.aclose()
 
 
-def make_llm_agent(llm: OpenAICompatLLM) -> Callable[[Any], AsyncIterator[str]]:
+def make_llm_agent(
+    llm: OpenAICompatLLM,
+    on_first_token: Callable[[float], None] | None = None,
+) -> Callable[[Any], AsyncIterator[str]]:
     """Default agent when the user plugs none: a plain streaming LLM chat.
 
     The returned handler follows the normal AgentContext contract, so
@@ -713,7 +772,7 @@ def make_llm_agent(llm: OpenAICompatLLM) -> Callable[[Any], AsyncIterator[str]]:
             f"voice conversation."
         )}]
         messages.extend(ctx.history[-12:])  # trailing window; voice = short turns
-        return llm.stream(messages)
+        return llm.stream(messages, on_first_token=on_first_token)
 
     return handler
 
@@ -745,6 +804,7 @@ class CartesiaTTS:
         self._context_seq = 0
         self._active_context: str | None = None
         self._lock = asyncio.Lock()  # one utterance in flight at a time
+        self.characters_sent: int = 0
 
     async def open(self) -> None:
         self._ws = await websockets.connect(
@@ -789,6 +849,7 @@ class CartesiaTTS:
         async for piece in chunks:
             if self._active_context != context_id:
                 return  # cancelled mid-stream
+            self.characters_sent += len(piece)
             await self._ws.send(self._payload(piece, context_id, cont=True))
         if self._active_context == context_id:
             # Empty final chunk closes the context and flushes remaining audio.
@@ -852,6 +913,7 @@ class ElevenLabsTTS:
         self._model = config.provider_options.get("tts_model", "eleven_flash_v2_5")
         self._active_ws: Any = None
         self._lock = asyncio.Lock()
+        self.characters_sent: int = 0
 
     def _url(self) -> str:
         rate = self._config.output_sample_rate
@@ -888,9 +950,9 @@ class ElevenLabsTTS:
                 with contextlib.suppress(Exception):
                     await ws.close()
 
-    @staticmethod
-    async def _send_chunks(ws: Any, chunks: AsyncIterator[str]) -> None:
+    async def _send_chunks(self, ws: Any, chunks: AsyncIterator[str]) -> None:
         async for piece in chunks:
+            self.characters_sent += len(piece)
             # Trailing space is required for correct word joining.
             await ws.send(json.dumps({"text": piece.rstrip() + " ", "flush": False}))
         await ws.send(json.dumps({"text": " ", "flush": True}))
@@ -950,12 +1012,12 @@ class SplitStackProxy(BaseVoiceAgentProxy):
         )
         self.llm = OpenAICompatLLM(opts)
         self._speech_started_at: float = 0.0
+        self._turn_end_at: float = 0.0
         self._warm_task: asyncio.Task[int] | None = None
 
     async def _connect(self) -> None:
         started = time.monotonic()
-        await self.asr.connect()
-        await self.tts.open()
+        await asyncio.gather(self.asr.connect(), self.tts.open())
         _record(self, "handshake", (time.monotonic() - started) * 1000.0)
         # Warm the filler phrase cache in the background — never block the
         # session start on TTS round trips.
@@ -976,6 +1038,7 @@ class SplitStackProxy(BaseVoiceAgentProxy):
                 self._speech_started_at = time.monotonic()
                 await self.on_user_speech_started()
             elif kind == "final" and payload:
+                self._turn_end_at = time.monotonic()
                 if self._speech_started_at:
                     _record(self, "asr_latency",
                             (time.monotonic() - self._speech_started_at) * 1000.0)
@@ -1028,12 +1091,28 @@ class SplitStackProxy(BaseVoiceAgentProxy):
             nonlocal got_first
             if not got_first:
                 got_first = True
-                _record(self, "tts_first_byte", (time.monotonic() - first_byte) * 1000.0)
+                now = time.monotonic()
+                _record(self, "tts_first_byte", (now - first_byte) * 1000.0)
+                # The caller-felt pause: end of their utterance -> first
+                # reply audio (spans ASR close-out, LLM TTFB, chunking, TTS).
+                if self._turn_end_at:
+                    _record(self, "e2e_response", (now - self._turn_end_at) * 1000.0)
+                    self._turn_end_at = 0.0
             self.enqueue_audio(pcm)
 
         await self.tts.speak(chunk_tokens(chunks), on_pcm)
         self.set_state(SessionState.LISTENING)
         return True
+
+    @property
+    def usage(self) -> dict[str, float]:
+        """Neutral per-session usage counters for cost accounting."""
+        return {
+            "asr_audio_seconds": self.asr.audio_seconds_sent,
+            "llm_input_tokens": self.llm.usage["input_tokens"],
+            "llm_output_tokens": self.llm.usage["output_tokens"],
+            "tts_characters": float(self.tts.characters_sent),
+        }
 
     async def close(self) -> None:
         if self._warm_task is not None:

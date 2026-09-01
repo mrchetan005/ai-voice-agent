@@ -205,6 +205,10 @@ class LatencyMetrics(BaseModel):
     llm_ttfb_ms: list[float] = Field(default_factory=list)
     tts_first_byte_ms: list[float] = Field(default_factory=list)
     network_rtt_ms: list[float] = Field(default_factory=list)
+    agent_turn_ms: list[float] = Field(default_factory=list)
+    # End of user utterance -> first reply PCM enqueued: the pause a caller
+    # actually hears. Only the split stack records it today.
+    e2e_response_ms: list[float] = Field(default_factory=list)
 
     @staticmethod
     def _summary(values: list[float]) -> dict[str, float]:
@@ -228,6 +232,8 @@ class LatencyMetrics(BaseModel):
             "llm_ttfb_ms": self._summary(self.llm_ttfb_ms),
             "tts_first_byte_ms": self._summary(self.tts_first_byte_ms),
             "network_rtt_ms": self._summary(self.network_rtt_ms),
+            "agent_turn_ms": self._summary(self.agent_turn_ms),
+            "e2e_response_ms": self._summary(self.e2e_response_ms),
         }
 
 
