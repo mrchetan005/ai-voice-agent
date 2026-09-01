@@ -21,6 +21,10 @@ _STEP_NAMES = {
     "get_available_slots": "checking_the_calendar",
     "book_appointment": "booking_the_slot",
     "request_email_over_whatsapp": "sending_you_a_whatsapp_message",
+    "confirm_email_on_whatsapp": "sending_the_confirmation_buttons",
+    "list_my_bookings": "checking_your_bookings",
+    "cancel_appointment": "cancelling_that",
+    "reschedule_appointment": "moving_your_booking",
 }
 
 
@@ -28,16 +32,23 @@ class BookingCall:
     def __init__(self, agent: BookingAgent, thread_id: str) -> None:
         self._agent = agent
         self.thread_id = thread_id
+        # THIS call's turns, for the post-call recap (DB rows are
+        # fire-and-forget and span every past session).
+        self.session_turns: list[tuple[str, str]] = []
 
     async def handler(self, ctx: Any) -> str | None:
         async def status_cb(tool_name: str) -> None:
             await ctx.status(_STEP_NAMES.get(tool_name, tool_name))
 
+        self.session_turns.append(("user", ctx.text))
         try:
-            return await self._agent.respond(ctx.text, self.thread_id, status_cb)
+            reply = await self._agent.respond(ctx.text, self.thread_id, status_cb)
         except Exception:
             logger.exception("booking agent turn failed")
             return "Sorry, I hit a snag on my side. Could you say that again?"
+        if reply:
+            self.session_turns.append(("assistant", reply))
+        return reply
 
     async def greet(self) -> str:
         """First words after the callee picks up — LLM-generated so repeat

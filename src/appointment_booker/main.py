@@ -19,15 +19,27 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import datetime as dt
 import json
 import logging
 import os
 import re
 import sys
+import uuid
 
 from appointment_booker.booking_handler import BookingCall
+from appointment_booker.booking_service import (
+    BookingService,
+    create_booking_service,
+)
 from appointment_booker.cal_client import CalClient
 from appointment_booker.graph import BookingAgent
+from appointment_booker.metering import (
+    ChatSessionTracker,
+    UsageMeter,
+    write_session_record,
+)
 from appointment_booker.native_tools import (
     TextBridge,
     TranscriptStore,
@@ -39,7 +51,10 @@ from appointment_booker.prompts import (
     DUAL_BRAIN_VOICE_PROMPT,
     INBOUND_PICKUP_NUDGE,
     build_single_brain_prompt,
+    render_profile_block,
 )
+from appointment_booker.recap import RecapSender
+from appointment_booker.stores import SessionStore
 from appointment_booker.transport_whatsapp import WhatsAppCallTransport
 from appointment_booker.webhooks import WebhookHub
 from appointment_booker.whatsapp_api import WhatsAppClient
@@ -53,6 +68,54 @@ logger = logging.getLogger("appointment_booker")
 async def _signal_end(hub: WebhookHub) -> None:
     """Agent-initiated hangup: same teardown path as a remote hangup."""
     hub.call_ended.set()
+
+
+async def _send_recap(
+    wa: WhatsAppClient,
+    recipient: str,
+    business: str,
+    turns: list[tuple[str, str]],
+    service: BookingService | None,
+    meter: UsageMeter | None = None,
+) -> None:
+    """Post-call recap on WhatsApp. Best-effort with a hard time cap —
+    a failed or slow recap must never block teardown."""
+    if not turns or service is None:
+        return
+    with contextlib.suppress(Exception):
+        upcoming = await service.booking_store.list_upcoming(recipient)
+        recap = RecapSender(wa, recipient, business, meter=meter)
+        await asyncio.wait_for(
+            recap.send(turns, service.session_actions, upcoming), timeout=30.0
+        )
+
+
+async def _record_session(
+    session_store: SessionStore,
+    meter: UsageMeter,
+    *,
+    turns: list[tuple[str, str]],
+    service: BookingService | None,
+    telemetry: object,
+    started_at: dt.datetime,
+    language: str = "",
+) -> None:
+    """Persist the voiceagent_sessions row at teardown (time-capped)."""
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(
+            write_session_record(
+                session_store, meter,
+                turns=turns,
+                actions=list(service.session_actions) if service else [],
+                errors=list(service.session_errors) if service else [],
+                telemetry=telemetry,
+                started_at=started_at,
+                db_degraded=session_store.degraded
+                or (service.booking_store.degraded if service else False),
+                language=language,
+            ),
+            timeout=15.0,
+        )
 
 
 async def _inject_chat_text(proxy: GeminiLiveProxy, text: str) -> None:
@@ -76,7 +139,7 @@ async def _single_brain_setup(
     timezone: str,
     business: str,
     inbound: bool,
-) -> tuple[str, dict, TranscriptStore, TextBridge]:
+) -> tuple[str, dict, TranscriptStore, TextBridge, BookingService]:
     """SINGLE-BRAIN session pieces: Gemini Live is the whole agent — persona
     + availability snapshot in its system instruction, Cal.com/WhatsApp tools
     registered natively, transcripts persisted asynchronously, farewell
@@ -104,6 +167,12 @@ async def _single_brain_setup(
     )
     await transcript_store.connect()
 
+    # Booking service: profile + booking stores, email confirmation state,
+    # and every Cal.com/WhatsApp booking operation (shared with dual-brain).
+    service = await create_booking_service(
+        cal, wa, hub, caller, event_type_id, timezone, "voice-single-brain"
+    )
+
     # Cross-channel context: previous calls AND chats with this number.
     history = await transcript_store.load_recent(30)
     system_prompt = build_single_brain_prompt(
@@ -112,17 +181,17 @@ async def _single_brain_setup(
         snapshot=snapshot,
         inbound=inbound,
         history="\n".join(f"{role}: {content[:150]}" for role, content in history),
+        profile=render_profile_block(service.profile),
     )
 
     # Chat<->call sync: texts sent DURING the call are injected into the
     # live session and satisfy email waits (single queue consumer).
     text_bridge = TextBridge(hub, transcript_store)
+    service.email_waiter = text_bridge.wait_email
 
     provider_options: dict = {
         "native_tools": build_native_tools(
-            cal, wa, hub, caller, event_type_id, timezone,
-            end_call_cb=lambda: _signal_end(hub),
-            text_bridge=text_bridge,
+            service, end_call_cb=lambda: _signal_end(hub),
         )
     }
 
@@ -149,7 +218,7 @@ async def _single_brain_setup(
             pending_end.append(asyncio.create_task(_delayed_hangup()))
 
     provider_options["on_transcription"] = on_transcription
-    return system_prompt, provider_options, transcript_store, text_bridge
+    return system_prompt, provider_options, transcript_store, text_bridge, service
 
 
 async def run_inbound(args: argparse.Namespace) -> int:
@@ -162,6 +231,8 @@ async def run_inbound(args: argparse.Namespace) -> int:
     event_type_id = int(os.environ["CAL_EVENT_TYPE_ID"])
     timezone = os.environ.get("CAL_TIMEZONE", "Asia/Kolkata")
     business = os.environ.get("BUSINESS_NAME", "our office")
+    session_store = SessionStore(os.environ["DATABASE_URL"])
+    await session_store.connect()
     try:
         try:
             await wa.enable_calling()
@@ -178,13 +249,16 @@ async def run_inbound(args: argparse.Namespace) -> int:
             transport = WhatsAppCallTransport(wa, hub, caller)
             transcript_store = None
             text_bridge = None
+            service = None
             try:
-                system_prompt, provider_options, transcript_store, text_bridge = (
+                system_prompt, provider_options, transcript_store, text_bridge, service = (
                     await _single_brain_setup(
                         cal, wa, hub, caller, event_type_id, timezone,
                         business, inbound=True,
                     )
                 )
+                meter = UsageMeter(uuid.uuid4().hex, caller, "voice-inbound", "single")
+                service.meter = meter
                 await transport.answer_call(incoming.call_id, incoming.sdp)
 
                 config = SessionConfig(
@@ -196,11 +270,13 @@ async def run_inbound(args: argparse.Namespace) -> int:
                     provider_options=provider_options,
                 )
                 proxy = GeminiLiveProxy(config, transport)
-                proxy.telemetry = TelemetryRecorder(config.session_id)
+                telemetry = TelemetryRecorder(config.session_id)
+                proxy.telemetry = telemetry
                 text_bridge.attach(
                     lambda text, proxy=proxy: _inject_chat_text(proxy, text)
                 )
                 text_bridge.start()
+                started_at = dt.datetime.now(dt.UTC)
                 session = asyncio.create_task(proxy.run())
                 await asyncio.sleep(1.0)  # audio path settles
                 await proxy._ws.send(json.dumps({
@@ -212,6 +288,17 @@ async def run_inbound(args: argparse.Namespace) -> int:
                     }
                 }))
                 await session
+                await _send_recap(
+                    wa, caller, business, transcript_store.session_turns, service,
+                    meter,
+                )
+                meter.merge_gemini_live(proxy.usage)
+                await _record_session(
+                    session_store, meter,
+                    turns=transcript_store.session_turns, service=service,
+                    telemetry=telemetry, started_at=started_at,
+                    language=config.language,
+                )
                 print("call ended; waiting for the next one")
             except Exception:
                 logger.exception("inbound call failed")
@@ -219,9 +306,12 @@ async def run_inbound(args: argparse.Namespace) -> int:
                 if text_bridge is not None:
                     text_bridge.stop()
                 await transport.close()
+                if service is not None:
+                    await service.aclose()
                 if transcript_store is not None:
                     await transcript_store.close()
     finally:
+        await session_store.close()
         cal.close()
         await wa.aclose()
         await hub.stop()
@@ -238,24 +328,82 @@ async def run_chat(args: argparse.Namespace) -> int:
     event_type_id = int(os.environ["CAL_EVENT_TYPE_ID"])
     timezone = os.environ.get("CAL_TIMEZONE", "Asia/Kolkata")
     business = os.environ.get("BUSINESS_NAME", "our office")
+    session_store = SessionStore(os.environ["DATABASE_URL"])
+    await session_store.connect()
     # ponytail: one BookingAgent (+ its own DB conn) per sender; fine for the
     # 5-recipient test allowlist — pool connections if this goes multi-tenant.
     agents: dict[str, BookingAgent] = {}
+    services: dict[str, BookingService] = {}
+    trackers: dict[str, ChatSessionTracker] = {}
+    pending_text: asyncio.Task | None = None
+    pending_button: asyncio.Task | None = None
+
+    async def flush_tracker(sender: str) -> None:
+        """Write one chat-session row and reset per-session state."""
+        tracker, service = trackers.get(sender), services.get(sender)
+        if tracker is None or service is None or not tracker.turns:
+            return
+        await _record_session(
+            session_store, tracker.meter,
+            turns=tracker.turns, service=service,
+            telemetry=None, started_at=tracker.started_at,
+        )
+        service.session_actions.clear()
+        service.session_errors.clear()
+
     print("chat mode: waiting for WhatsApp messages…")
     try:
         while True:
-            msg = await hub.wait_text(timeout_s=3600)
-            sender, text = msg.from_number, msg.text.strip()
+            # Two inbound lanes: typed texts AND button taps (email confirm).
+            # Persistent getter tasks so no queued item is ever dropped.
+            if pending_text is None:
+                pending_text = asyncio.create_task(hub.text_messages.get())
+            if pending_button is None:
+                pending_button = asyncio.create_task(hub.button_replies.get())
+            done, _pending = await asyncio.wait(
+                {pending_text, pending_button},
+                timeout=3600, return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                print("no messages for an hour; shutting down")
+                return 0
+            if pending_text in done:
+                msg = pending_text.result()
+                pending_text = None
+                sender, text = msg.from_number, msg.text.strip()
+            else:
+                tap = pending_button.result()
+                pending_button = None
+                sender = tap.from_number
+                if tap.button_id.startswith("email_ok:") and sender in services:
+                    # Unlock the booking gate BEFORE the model sees the tap.
+                    services[sender].mark_confirmed(tap.button_id.split(":", 1)[1])
+                text = f"[user tapped button: {tap.title}]"
             if not sender or not text:
                 continue
             print(f"[{sender}] {text[:80]}")
             if sender not in agents:
+                service = await create_booking_service(
+                    cal, wa, hub, sender, event_type_id, timezone, "whatsapp-chat"
+                )
+                services[sender] = service
                 agent = BookingAgent(
-                    cal, event_type_id, wa, hub, sender,
+                    cal, event_type_id, wa, hub, sender, service,
                     timezone=timezone, business_name=business, channel="chat",
+                    profile_note=render_profile_block(service.profile),
                 )
                 await agent.start()
                 agents[sender] = agent
+                trackers[sender] = ChatSessionTracker(sender)
+            tracker = trackers[sender]
+            if tracker.stale():
+                # >30 min of silence: close the old chat session, start fresh.
+                await flush_tracker(sender)
+                tracker.reset()
+            services[sender].meter = tracker.meter
+            agents[sender].meter = tracker.meter
+            tracker.touch()
+            tracker.turns.append(("user", text))
             try:
                 reply = await agents[sender].respond(text, f"wa-{sender.lstrip('+')}")
             except Exception:
@@ -263,13 +411,20 @@ async def run_chat(args: argparse.Namespace) -> int:
                 reply = "Sorry, something went wrong on my side — could you send that again?"
             if reply:
                 await wa.send_text(sender, reply)
+                tracker.turns.append(("assistant", reply))
+                tracker.meter.add("whatsapp", "messages", 1)
                 print(f"[priya -> {sender}] {reply[:80]}")
-    except TimeoutError:
-        print("no messages for an hour; shutting down")
-        return 0
     finally:
+        for task in (pending_text, pending_button):
+            if task is not None:
+                task.cancel()
+        for sender in list(trackers):
+            await flush_tracker(sender)
         for agent in agents.values():
             await agent.stop()
+        for service in services.values():
+            await service.aclose()
+        await session_store.close()
         cal.close()
         await wa.aclose()
         await hub.stop()
@@ -292,6 +447,8 @@ async def run(args: argparse.Namespace) -> int:
     booking_agent: BookingAgent | None = None
     transcript_store: TranscriptStore | None = None
     text_bridge: TextBridge | None = None
+    service: BookingService | None = None
+    session_store: SessionStore | None = None
     try:
         try:
             await wa.enable_calling()
@@ -316,11 +473,14 @@ async def run(args: argparse.Namespace) -> int:
         event_type_id = int(os.environ["CAL_EVENT_TYPE_ID"])
         timezone = os.environ.get("CAL_TIMEZONE", "Asia/Kolkata")
         business = os.environ.get("BUSINESS_NAME", "our office")
+        session_store = SessionStore(os.environ["DATABASE_URL"])
+        await session_store.connect()
+        meter = UsageMeter(uuid.uuid4().hex, recipient, "voice-outbound", args.brain)
         provider_options: dict = {}
         call: BookingCall | None = None
 
         if args.brain == "single":
-            system_prompt, provider_options, transcript_store, text_bridge = (
+            system_prompt, provider_options, transcript_store, text_bridge, service = (
                 await _single_brain_setup(
                     cal, wa, hub, recipient, event_type_id, timezone, business,
                     inbound=False,
@@ -330,12 +490,19 @@ async def run(args: argparse.Namespace) -> int:
             # DUAL-BRAIN (kept as an option): LangGraph agent behind
             # send_to_agent; richer control, one extra LLM hop per reply.
             system_prompt = DUAL_BRAIN_VOICE_PROMPT
-            booking_agent = BookingAgent(
-                cal, event_type_id, wa, hub, recipient,
-                timezone=timezone, business_name=business,
+            service = await create_booking_service(
+                cal, wa, hub, recipient, event_type_id, timezone,
+                "whatsapp-voice-agent",
             )
+            booking_agent = BookingAgent(
+                cal, event_type_id, wa, hub, recipient, service,
+                timezone=timezone, business_name=business,
+                profile_note=render_profile_block(service.profile),
+            )
+            booking_agent.meter = meter
             await booking_agent.start()
 
+        service.meter = meter
         transport = WhatsAppCallTransport(wa, hub, recipient)
         print(f"placing WhatsApp call… (brain={args.brain})")
         await transport.place_call()
@@ -366,6 +533,7 @@ async def run(args: argparse.Namespace) -> int:
             )
             proxy.bind(bridge)
 
+        started_at = dt.datetime.now(dt.UTC)
         session = asyncio.create_task(proxy.run())
         # Greet only once the callee has actually picked up — speaking during
         # RINGING is how the caller misses the first sentence.
@@ -390,6 +558,19 @@ async def run(args: argparse.Namespace) -> int:
             }))
 
         await session  # ends on hangup (webhook), goAway exhaustion, or error
+        turns = (
+            transcript_store.session_turns if transcript_store is not None
+            else call.session_turns if call is not None
+            else []
+        )
+        await _send_recap(wa, recipient, business, turns, service, meter)
+        meter.merge_gemini_live(proxy.usage)
+        await _record_session(
+            session_store, meter,
+            turns=turns, service=service,
+            telemetry=telemetry, started_at=started_at,
+            language=config.language,
+        )
         print("\ncall ended. latency report:")
         print(json.dumps(telemetry.report(), indent=2))
         if call is not None:
@@ -402,6 +583,10 @@ async def run(args: argparse.Namespace) -> int:
             await transport.close()
         if booking_agent is not None:
             await booking_agent.stop()
+        if service is not None:
+            await service.aclose()
+        if session_store is not None:
+            await session_store.close()
         if transcript_store is not None:
             await transcript_store.close()
         if cal is not None:

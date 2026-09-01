@@ -112,6 +112,18 @@ class CalClient:
         resp.raise_for_status()
         return resp.json().get("data", {})
 
+    def reschedule_booking(
+        self, uid: str, start_utc_iso: str, reason: str = "rescheduled by agent"
+    ) -> dict[str, Any]:
+        """Returns the NEW booking (fresh uid; old one is in rescheduledFromUid)."""
+        resp = self._http.post(
+            f"/bookings/{uid}/reschedule",
+            json={"start": start_utc_iso, "reschedulingReason": reason},
+            headers=self._headers(V_BOOKINGS),
+        )
+        resp.raise_for_status()
+        return resp.json().get("data", {})
+
     def cancel_booking(self, uid: str, reason: str = "cancelled by agent") -> dict[str, Any]:
         resp = self._http.post(
             f"/bookings/{uid}/cancel",

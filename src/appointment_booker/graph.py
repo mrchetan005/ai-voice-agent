@@ -24,7 +24,6 @@ import datetime as dt
 import json
 import logging
 import os
-import re
 import sys
 import time
 from collections.abc import Awaitable, Callable
@@ -38,6 +37,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.prebuilt import create_react_agent
 
+from appointment_booker.booking_service import BookingService
 from appointment_booker.cal_client import CalClient
 from appointment_booker.prompts import (
     AVAILABILITY_GUIDE,
@@ -51,8 +51,6 @@ from appointment_booker.whatsapp_api import WhatsAppClient
 
 logger = logging.getLogger("appointment_booker")
 
-_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
-
 
 class BookingAgent:
     """Checkpointed conversational agent; one instance per process,
@@ -65,13 +63,18 @@ class BookingAgent:
         wa: WhatsAppClient,
         hub: WebhookHub,
         recipient: str,
+        service: BookingService,
         timezone: str = "Asia/Kolkata",
         db_url: str | None = None,
         model: str | None = None,
         business_name: str = "our office",
         channel: str = "voice",  # "voice" (call relay) or "chat" (WA text)
+        profile_note: str = "",
     ) -> None:
         self._channel = channel
+        self.service = service
+        # Optional UsageMeter: token usage from every model invocation.
+        self.meter: Any = None
         self._cal = cal
         self._event_type_id = event_type_id
         self._tz = ZoneInfo(timezone)
@@ -103,74 +106,83 @@ class BookingAgent:
 
         @tool
         def book_appointment(
-            start_local_iso: str, attendee_name: str, topic: str, email: str = ""
+            start_local_iso: str,
+            attendee_name: str,
+            topic: str,
+            email: str,
+            book_anyway: bool = False,
         ) -> str:
             """Book the confirmed slot. start_local_iso must be the exact
             slot start copied from get_available_slots output. Call ONLY
-            after the caller clearly said yes to this specific time.
-            Leave email empty if not collected."""
-            parsed = dt.datetime.fromisoformat(start_local_iso)
-            if parsed.tzinfo is None:
-                # Snapshot times are org-local; never trust the OS timezone.
-                parsed = parsed.replace(tzinfo=self._tz)
-            start_utc = parsed.astimezone(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-            # This event type's booking fields REQUIRE an email (verified:
-            # {email}error_required_field). Placeholder keeps voice booking
-            # unblocked; the real confirmation goes out on WhatsApp.
-            # ".invalid" TLD is rejected by Cal's validator; example.com passes.
-            effective_email = email or f"wa{recipient.lstrip('+')}@example.com"
-            try:
-                booking = cal.create_booking(
-                    event_type_id,
-                    start_utc,
-                    attendee_name,
-                    timezone,
-                    effective_email,
-                    f"+{recipient.lstrip('+')}",
-                    metadata={"topic": topic[:200], "source": "whatsapp-voice-agent"},
-                )
-            except Exception as exc:  # LLM adapts to the failure text
-                return f"BOOKING_FAILED: {str(exc)[:200]}"
-            uid = booking.get("uid", "")
-            from appointment_booker.native_tools import format_confirmation
-
-            self._fire_and_forget(
-                wa.send_text(
-                    recipient,
-                    format_confirmation(parsed, timezone, topic, uid),
-                )
-            )
-            return f"BOOKED uid={uid}. Confirmation sent on WhatsApp."
+            after the caller clearly said yes to this specific time AND
+            their email is confirmed. Returns EMAIL_REQUIRED /
+            EMAIL_NOT_CONFIRMED / EXISTING_BOOKING when preconditions are
+            missing; set book_anyway=true only after the caller chose to
+            keep an existing booking and add this one."""
+            return json.dumps(self._run_on_loop(
+                service.book(start_local_iso, attendee_name, topic, email,
+                             book_anyway=book_anyway)
+            ))
 
         @tool
-        def request_email_over_whatsapp(wait_seconds: int = 60) -> str:
+        def request_email_over_whatsapp(wait_seconds: int = 45) -> str:
             """Send the caller a WhatsApp text asking for their email and
             wait for the reply. Use while telling the caller you've sent it.
-            Returns the email, or NO_REPLY if none arrives in time."""
-            self._run_on_loop(
-                wa.send_text(
-                    recipient,
-                    "📧 To finish your booking, please reply here with your email address.",
-                )
-            )
-            stop_at = time.monotonic() + min(max(wait_seconds, 10), 120)
-            while (remaining := stop_at - time.monotonic()) > 0:
-                try:
-                    msg = self._run_on_loop(hub.wait_text(timeout_s=remaining))
-                except Exception:
-                    return "NO_REPLY"
-                if match := _EMAIL_RE.search(msg.text):
-                    return match.group()
-            return "NO_REPLY"
+            Email is REQUIRED before booking. Returns the email, or NO_REPLY
+            if none arrives in time (you may call again to keep waiting)."""
+            wait_s = float(min(max(wait_seconds, 10), 50))
+            return json.dumps(self._run_on_loop(service.request_email(wait_s)))
+
+        @tool
+        def confirm_email_on_whatsapp(email: str) -> str:
+            """Send the collected email back on WhatsApp with Confirm/Edit
+            buttons. Booking is blocked until the caller confirms. On voice
+            calls this waits for the tap (call again on NO_REPLY); in chat
+            the tap arrives as the caller's next message — do NOT book until
+            you see they confirmed."""
+            sent = self._run_on_loop(service.send_email_confirmation(email))
+            if sent.get("status") != "CONFIRMATION_SENT":
+                return json.dumps(sent)
+            if self._channel == "chat":
+                return json.dumps({
+                    "status": "CONFIRMATION_SENT",
+                    "hint": "wait for the caller's Confirm tap before booking",
+                })
+            return json.dumps(self._run_on_loop(service.wait_email_confirmation(40.0)))
+
+        @tool
+        def list_my_bookings() -> str:
+            """List the caller's upcoming appointments (uid, local time,
+            topic). Call this FIRST when they ask to change, cancel or
+            check a booking."""
+            return json.dumps(self._run_on_loop(service.list_bookings()))
+
+        @tool
+        def cancel_appointment(booking_uid: str, reason: str = "") -> str:
+            """Cancel a booking by uid. Read the booking back and get an
+            explicit yes BEFORE calling."""
+            return json.dumps(self._run_on_loop(service.cancel(booking_uid, reason)))
+
+        @tool
+        def reschedule_appointment(booking_uid: str, new_start_local_iso: str) -> str:
+            """Move a booking to a new local time. Needs an explicit yes to
+            the new exact slot first. Returns the NEW booking uid."""
+            return json.dumps(self._run_on_loop(
+                service.reschedule(booking_uid, new_start_local_iso)
+            ))
 
         self._llm = ChatGoogleGenerativeAI(
             model=model or os.environ.get("SCHEDULER_MODEL", "gemini-3.6-flash"),
             temperature=0.6,
         )
+        manage_tools = [
+            confirm_email_on_whatsapp, list_my_bookings,
+            cancel_appointment, reschedule_appointment,
+        ]
         if channel == "chat":
             # Chat: user can just type their email — the wait-for-reply tool
             # would fight the chat loop for the same message queue.
-            self._tools = [get_available_slots, book_appointment]
+            self._tools = [get_available_slots, book_appointment, *manage_tools]
             self._prompt = (
                 CHAT_RULES.format(business_name=business_name)
                 + AVAILABILITY_GUIDE
@@ -178,13 +190,16 @@ class BookingAgent:
             )
         else:
             self._tools = [
-                get_available_slots, book_appointment, request_email_over_whatsapp,
+                get_available_slots, book_appointment,
+                request_email_over_whatsapp, *manage_tools,
             ]
             self._prompt = (
                 VOICE_RULES.format(business_name=business_name)
                 + AVAILABILITY_GUIDE
                 + VOICE_DELIVERY_NOTE
             )
+        if profile_note:
+            self._prompt += profile_note
 
     # -- thread bridging (tools run in LangGraph's worker thread) -------------
 
@@ -358,10 +373,20 @@ class BookingAgent:
                     ):
                         kind = event.get("event")
                         if kind == "on_chat_model_end":
+                            output = event.get("data", {}).get("output")
+                            # One usage record per model invocation (tool
+                            # decisions + final reply) — summing is correct.
+                            if self.meter is not None and (
+                                usage := getattr(output, "usage_metadata", None)
+                            ):
+                                self.meter.add("gemini_flash", "input_tokens",
+                                               usage.get("input_tokens", 0))
+                                self.meter.add("gemini_flash", "output_tokens",
+                                               usage.get("output_tokens", 0))
                             # Gemini 3.x content is a list of parts, not a
                             # plain string; the LAST model turn is the reply
                             # (earlier ones are tool-call decisions).
-                            reply = self._extract_text(event.get("data", {}).get("output"))
+                            reply = self._extract_text(output)
                             if reply:
                                 final = reply
                         elif kind == "on_tool_start" and status_cb is not None:
@@ -428,17 +453,20 @@ class BookingAgent:
 
 
 async def _self_check(utterance: str) -> int:
+    from appointment_booker.booking_service import create_booking_service
+
     logging.basicConfig(level=logging.INFO)
     cal = CalClient()
     wa = WhatsAppClient()
     hub = WebhookHub()  # not started: email tool unused in this check
+    recipient = os.environ["WHATSAPP_RECIPIENT"]
+    event_type_id = int(os.environ["CAL_EVENT_TYPE_ID"])
+    timezone = os.environ.get("CAL_TIMEZONE", "Asia/Kolkata")
+    service = await create_booking_service(
+        cal, wa, hub, recipient, event_type_id, timezone, "self-check"
+    )
     agent = BookingAgent(
-        cal,
-        int(os.environ["CAL_EVENT_TYPE_ID"]),
-        wa,
-        hub,
-        os.environ["WHATSAPP_RECIPIENT"],
-        timezone=os.environ.get("CAL_TIMEZONE", "Asia/Kolkata"),
+        cal, event_type_id, wa, hub, recipient, service, timezone=timezone,
     )
     await agent.start()
     try:
@@ -454,6 +482,7 @@ async def _self_check(utterance: str) -> int:
         return 0 if reply and reply2 and reply2 != reply else 1
     finally:
         await agent.stop()
+        await service.aclose()
         await wa.aclose()
         cal.close()
 

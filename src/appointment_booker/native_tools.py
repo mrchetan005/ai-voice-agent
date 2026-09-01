@@ -11,19 +11,20 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
-import re
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
 
-from appointment_booker.cal_client import CalClient
+from appointment_booker.booking_service import (
+    EMAIL_RE as _EMAIL_RE,
+)
+from appointment_booker.booking_service import (
+    BookingService,
+    format_confirmation,  # noqa: F401  (re-export; graph.py imported it here)
+)
 from appointment_booker.webhooks import WebhookHub
-from appointment_booker.whatsapp_api import WhatsAppClient
 
 logger = logging.getLogger("appointment_booker")
-
-_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
 
 
 # Tool arguments come from the LLM — validate them like any untrusted input.
@@ -39,26 +40,25 @@ class BookingArgs(BaseModel):
     attendee_name: str = ""
     topic: str = ""
     email: str = ""
+    book_anyway: bool = False
 
 
 class EmailWaitArgs(BaseModel):
     wait_seconds: float | None = None  # model may omit or send null
 
 
-def format_confirmation(
-    when_local: dt.datetime, timezone: str, topic: str, uid: str
-) -> str:
-    """Human-readable WhatsApp confirmation (WA markdown: *bold*, _italic_).
+class EmailConfirmArgs(BaseModel):
+    email: str
 
-    Raw ISO timestamps and dangling empty fields read like debug output —
-    spell the datetime out and skip what's missing.
-    """
-    when = when_local.strftime("%A, %d %B %Y at %I:%M %p")
-    lines = ["✅ *Appointment Confirmed*", "", f"📅 {when}", f"🌏 {timezone}"]
-    if topic.strip():
-        lines.append(f"📝 {topic.strip()}")
-    lines += ["", f"Ref: {uid}", "_Reply here if you need to reschedule._"]
-    return "\n".join(lines)
+
+class BookingRefArgs(BaseModel):
+    booking_uid: str
+    reason: str = ""
+
+
+class RescheduleArgs(BaseModel):
+    booking_uid: str
+    new_start_local_iso: dt.datetime
 
 
 class TranscriptStore:
@@ -73,6 +73,9 @@ class TranscriptStore:
         self._thread_id = thread_id
         self._db_url = db_url
         self._db: Any = None
+        # THIS session's turns only (DB rows span all past sessions and may
+        # land after hangup — fire-and-forget). Feeds the post-call recap.
+        self.session_turns: list[tuple[str, str]] = []
 
     async def connect(self) -> None:
         import psycopg
@@ -93,6 +96,7 @@ class TranscriptStore:
 
     async def save(self, role: str, text: str) -> None:
         """Signature matches GeminiLiveProxy's on_transcription callback."""
+        self.session_turns.append((role, text))
         if self._db is None:
             return
         asyncio.get_running_loop().create_task(self._insert(role, text))
@@ -195,18 +199,15 @@ class TextBridge:
 
 
 def build_native_tools(
-    cal: CalClient,
-    wa: WhatsAppClient,
-    hub: WebhookHub,
-    recipient: str,
-    event_type_id: int,
-    timezone: str = "Asia/Kolkata",
+    service: BookingService,
     end_call_cb: Any = None,
-    text_bridge: TextBridge | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Returns {tool_name: {"declaration": <Gemini functionDeclaration>,
-    "handler": async fn(args) -> dict}} for GeminiLiveProxy native_tools."""
-    tz = ZoneInfo(timezone)
+    "handler": async fn(args) -> dict}} for GeminiLiveProxy native_tools.
+
+    Handlers are thin arg-validation wrappers over BookingService so both
+    brain modes share one implementation of every booking operation.
+    """
 
     async def end_call(args: dict[str, Any]) -> dict[str, Any]:
         if end_call_cb is None:
@@ -224,11 +225,12 @@ def build_native_tools(
     async def get_available_slots(args: dict[str, Any]) -> dict[str, Any]:
         query = SlotQueryArgs.model_validate(args)
         slots = await asyncio.to_thread(
-            cal.get_slots, event_type_id, query.start_date, query.end_date, timezone
+            service.cal.get_slots, service.event_type_id,
+            query.start_date, query.end_date, service.timezone,
         )
         # Compact for prompt economy: 8 slots/day max, local HH:MM only.
         return {
-            "timezone": timezone,
+            "timezone": service.timezone,
             "slots": {
                 day: [entry["start"][11:16] for entry in entries[:8]]
                 for day, entries in slots.items()
@@ -237,45 +239,37 @@ def build_native_tools(
 
     async def book_appointment(args: dict[str, Any]) -> dict[str, Any]:
         request = BookingArgs.model_validate(args)
-        parsed = request.start_local_iso
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=tz)
-        start_utc = parsed.astimezone(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        # Event type requires an email; placeholder unblocks voice booking
-        # (verified working) — real confirmation goes out on WhatsApp.
-        email = request.email or f"wa{recipient.lstrip('+')}@example.com"
-        try:
-            booking = await asyncio.to_thread(
-                cal.create_booking,
-                event_type_id,
-                start_utc,
-                request.attendee_name or "WhatsApp Caller",
-                timezone,
-                email,
-                f"+{recipient.lstrip('+')}",
-                {"topic": request.topic[:200], "source": "voice-single-brain"},
-            )
-        except Exception as exc:
-            logger.exception("booking failed")
-            return {"status": "FAILED", "error": str(exc)[:200]}
-        uid = booking.get("uid", "")
-        asyncio.get_running_loop().create_task(wa.send_text(
-            recipient,
-            format_confirmation(parsed, timezone, request.topic, uid),
-        ))
-        return {"status": "BOOKED", "uid": uid}
+        return await service.book(
+            request.start_local_iso.isoformat(),
+            request.attendee_name,
+            request.topic,
+            request.email,
+            book_anyway=request.book_anyway,
+        )
 
     async def request_email_over_whatsapp(args: dict[str, Any]) -> dict[str, Any]:
-        await wa.send_text(
-            recipient,
-            "📧 To finish your booking, please reply here with your email address.",
-        )
         wait_s = min(max(EmailWaitArgs.model_validate(args).wait_seconds or 45.0, 10.0), 90.0)
-        # The bridge owns the text queue during calls (single consumer);
-        # it hands us the email when the reply lands.
-        assert text_bridge is not None, "call setup must provide a TextBridge"
-        email = await text_bridge.wait_email(wait_s)
-        return {"email": email} if email else {"status": "NO_REPLY"}
+        return await service.request_email(wait_s)
+
+    async def confirm_email_on_whatsapp(args: dict[str, Any]) -> dict[str, Any]:
+        request = EmailConfirmArgs.model_validate(args)
+        sent = await service.send_email_confirmation(request.email)
+        if sent.get("status") != "CONFIRMATION_SENT":
+            return sent
+        return await service.wait_email_confirmation(40.0)
+
+    async def list_my_bookings(args: dict[str, Any]) -> dict[str, Any]:
+        return await service.list_bookings()
+
+    async def cancel_appointment(args: dict[str, Any]) -> dict[str, Any]:
+        request = BookingRefArgs.model_validate(args)
+        return await service.cancel(request.booking_uid, request.reason)
+
+    async def reschedule_appointment(args: dict[str, Any]) -> dict[str, Any]:
+        request = RescheduleArgs.model_validate(args)
+        return await service.reschedule(
+            request.booking_uid, request.new_start_local_iso.isoformat()
+        )
 
     return {
         "get_available_slots": {
@@ -300,17 +294,25 @@ def build_native_tools(
                 "name": "book_appointment",
                 "description": "Book the confirmed slot. Call ONLY after the "
                                "caller explicitly said yes to this exact day "
-                               "and time. start_local_iso is local time, e.g. "
-                               "2026-08-29T16:00:00.",
+                               "and time AND their email is confirmed. "
+                               "start_local_iso is local time, e.g. "
+                               "2026-08-29T16:00:00. Returns EMAIL_REQUIRED / "
+                               "EMAIL_NOT_CONFIRMED / EXISTING_BOOKING when "
+                               "preconditions are missing.",
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {
                         "start_local_iso": {"type": "STRING"},
                         "attendee_name": {"type": "STRING"},
                         "topic": {"type": "STRING"},
-                        "email": {"type": "STRING", "description": "empty if not collected"},
+                        "email": {"type": "STRING",
+                                  "description": "the WhatsApp-confirmed email"},
+                        "book_anyway": {"type": "BOOLEAN",
+                                        "description": "true only after the caller "
+                                                       "chose to keep an existing "
+                                                       "booking AND add this one"},
                     },
-                    "required": ["start_local_iso", "attendee_name", "topic"],
+                    "required": ["start_local_iso", "attendee_name", "topic", "email"],
                 },
             },
             "handler": book_appointment,
@@ -320,8 +322,8 @@ def build_native_tools(
                 "name": "request_email_over_whatsapp",
                 "description": "Send the caller a WhatsApp text asking for "
                                "their email and wait for the reply. Tell the "
-                               "caller you've sent it while waiting. Booking "
-                               "works without email too.",
+                               "caller you've sent it while waiting. Email is "
+                               "REQUIRED before booking.",
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {
@@ -330,6 +332,68 @@ def build_native_tools(
                 },
             },
             "handler": request_email_over_whatsapp,
+        },
+        "confirm_email_on_whatsapp": {
+            "declaration": {
+                "name": "confirm_email_on_whatsapp",
+                "description": "Send the collected email back to the caller "
+                               "on WhatsApp with Confirm/Edit buttons and "
+                               "wait for their tap. Booking is blocked until "
+                               "this returns CONFIRMED. On NO_REPLY you may "
+                               "call it again to keep waiting.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "email": {"type": "STRING"},
+                    },
+                    "required": ["email"],
+                },
+            },
+            "handler": confirm_email_on_whatsapp,
+        },
+        "list_my_bookings": {
+            "declaration": {
+                "name": "list_my_bookings",
+                "description": "List the caller's upcoming appointments "
+                               "(uid, local time, topic). Call this FIRST "
+                               "when they ask to change, cancel or check a "
+                               "booking.",
+                "parameters": {"type": "OBJECT", "properties": {}},
+            },
+            "handler": list_my_bookings,
+        },
+        "cancel_appointment": {
+            "declaration": {
+                "name": "cancel_appointment",
+                "description": "Cancel a booking by uid. Read the booking "
+                               "back and get an explicit yes BEFORE calling.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "booking_uid": {"type": "STRING"},
+                        "reason": {"type": "STRING"},
+                    },
+                    "required": ["booking_uid"],
+                },
+            },
+            "handler": cancel_appointment,
+        },
+        "reschedule_appointment": {
+            "declaration": {
+                "name": "reschedule_appointment",
+                "description": "Move a booking to a new local time. Needs an "
+                               "explicit yes to the new exact slot first. "
+                               "Returns the NEW booking uid.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "booking_uid": {"type": "STRING"},
+                        "new_start_local_iso": {"type": "STRING"},
+                    },
+                    "required": ["booking_uid", "new_start_local_iso"],
+                },
+            },
+            "handler": reschedule_appointment,
         },
         "end_call": {
             "declaration": {

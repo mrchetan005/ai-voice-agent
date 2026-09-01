@@ -23,6 +23,8 @@ from typing import Any
 from aiohttp import web
 from pydantic import BaseModel
 
+from appointment_booker.metrics_api import MetricsAPI
+
 logger = logging.getLogger("appointment_booker")
 
 
@@ -44,6 +46,14 @@ class TextMessage(BaseModel):
     text: str = ""
 
 
+class ButtonReply(BaseModel):
+    """User tapped a reply button on an interactive message."""
+
+    from_number: str = ""
+    button_id: str = ""
+    title: str = ""
+
+
 class WebhookHub:
     def __init__(self, verify_token: str | None = None, port: int = 8080) -> None:
         self._verify_token = verify_token or os.environ.get("WHATSAPP_VERIFY_TOKEN", "voiceagent")
@@ -53,11 +63,13 @@ class WebhookHub:
         self.incoming_calls: asyncio.Queue[CallEvent] = asyncio.Queue(maxsize=8)
         self.permission_results: asyncio.Queue[bool] = asyncio.Queue(maxsize=8)
         self.text_messages: asyncio.Queue[TextMessage] = asyncio.Queue(maxsize=32)
+        self.button_replies: asyncio.Queue[ButtonReply] = asyncio.Queue(maxsize=16)
         self.call_ended = asyncio.Event()
         # Set when the callee actually picks up (status ACCEPTED) — greeting
         # must wait for this, or the first words play into the ringtone.
         self.call_accepted = asyncio.Event()
         self._runner: web.AppRunner | None = None
+        self._metrics = MetricsAPI()
 
     # -- http ----------------------------------------------------------------
 
@@ -131,6 +143,14 @@ class WebhookHub:
                 response = str(reply.get("response", "")).lower()
                 self._put(self.permission_results, response in ("accept", "accepted"))
                 return
+            if interactive.get("type") == "button_reply":
+                br = interactive.get("button_reply") or {}
+                self._put(self.button_replies, ButtonReply(
+                    from_number=message.get("from", ""),
+                    button_id=str(br.get("id", "")),
+                    title=str(br.get("title", "")),
+                ))
+                return
         # Unknown interactive/button shapes: look for the permission verdict
         # anywhere in the message (button payloads use ACCEPTED/REJECTED).
         blob = json.dumps(message).lower()
@@ -150,6 +170,9 @@ class WebhookHub:
         app = web.Application()
         app.router.add_get("/webhook", self._verify)
         app.router.add_post("/webhook", self._receive)
+        # Observability (bearer-token gated; 404 when METRICS_TOKEN unset).
+        app.router.add_get("/report", self._metrics.handle_report)
+        app.router.add_get("/costs", self._metrics.handle_costs)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         site = web.TCPSite(self._runner, "0.0.0.0", self._port)
@@ -169,5 +192,8 @@ class WebhookHub:
 
     async def wait_text(self, timeout_s: float = 60.0) -> TextMessage:
         return await asyncio.wait_for(self.text_messages.get(), timeout_s)
+
+    async def wait_button(self, timeout_s: float = 60.0) -> ButtonReply:
+        return await asyncio.wait_for(self.button_replies.get(), timeout_s)
 
 

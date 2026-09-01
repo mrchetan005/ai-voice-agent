@@ -61,6 +61,25 @@ class WhatsAppClient:
             "text": {"body": body},
         })
 
+    async def send_button_message(
+        self, to: str, body: str, buttons: list[tuple[str, str]]
+    ) -> dict[str, Any]:
+        """Reply-buttons message. ``buttons`` is [(id, title)]: max 3,
+        title <= 20 chars, id <= 256 chars (ids may carry payload data)."""
+        return await self._post(f"/{self.phone_number_id}/messages", {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": body},
+                "action": {"buttons": [
+                    {"type": "reply", "reply": {"id": bid, "title": title}}
+                    for bid, title in buttons[:3]
+                ]},
+            },
+        })
+
     async def send_permission_request(self, to: str, reason: str) -> dict[str, Any]:
         """Interactive call-permission request (works inside a 24 h session;
         outside one, Meta requires an approved template with a
