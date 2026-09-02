@@ -19,11 +19,15 @@ def main() -> int:
         if not ok:
             failures.append(name)
 
-    # Default placeholders are zero -> zero cost, quantities preserved.
-    result = compute_cost({"gemini_live": {"prompt_tokens_audio": 1000}})
-    check("placeholder rates -> $0 but units kept",
-          result["total_usd"] == 0.0
-          and result["breakdown"]["gemini_live"]["units"]["prompt_tokens_audio"] == 1000)
+    # Defaults ship with real rates (verified 2026-09-06) — math must match.
+    rate = PRICES[("gemini_live", "prompt_tokens_audio")]
+    result = compute_cost({"gemini_live": {"prompt_tokens_audio": 1_000_000}})
+    check("default rates are non-zero and drive the math",
+          rate > 0
+          and abs(result["total_usd"] - rate * 1_000_000) < 1e-9
+          and result["breakdown"]["gemini_live"]["units"]["prompt_tokens_audio"] == 1_000_000)
+    check("Gemini Live audio-in default matches the $3/1M rate card",
+          abs(rate * 1_000_000 - 3.00) < 1e-9)
 
     # Env override drives the math.
     os.environ["PRICE_GEMINI_LIVE_PROMPT_TOKENS_AUDIO"] = "0.000002"

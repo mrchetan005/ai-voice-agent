@@ -1,21 +1,14 @@
 """Per-unit provider rates and cost computation.
 
-╔══════════════════════════════════════════════════════════════════════╗
-║  OPERATOR ACTION REQUIRED: every rate below ships as 0.0.             ║
-║  Fill in real USD-per-unit prices from the provider pricing pages     ║
-║  (or set PRICE_* env overrides) or every cost will read $0.00:        ║
-║    Gemini:   https://ai.google.dev/pricing                            ║
-║    Deepgram: https://deepgram.com/pricing                             ║
-║    Groq:     https://groq.com/pricing                                 ║
-║    Cartesia: https://cartesia.ai/pricing                              ║
-║    WhatsApp: https://business.whatsapp.com/products/platform-pricing  ║
-║  Raw quantities are always recorded, so past sessions can be          ║
-║  re-priced retroactively from the sessions table's `usage` column.    ║
-╚══════════════════════════════════════════════════════════════════════╝
+Rates below were taken from the provider pricing pages on 2026-09-06
+(source noted per block). Providers reprice without notice — re-verify
+periodically or pin your own numbers via PRICE_* env overrides. Raw
+quantities are always recorded, so past sessions can be re-priced
+retroactively from the sessions table's `usage` column.
 
-Units are what the meters count: tokens are per SINGLE token (divide the
-provider's per-1M rate by 1_000_000), audio per second, TTS per character,
-WhatsApp per message.
+Units are what the meters count: tokens are per SINGLE token (the
+provider's per-1M rate divided by 1_000_000), audio per second, TTS per
+character, WhatsApp per message.
 """
 
 from __future__ import annotations
@@ -27,25 +20,40 @@ from typing import Any
 logger = logging.getLogger("appointment_booker")
 
 PRICES: dict[tuple[str, str], float] = {
-    # Gemini Live (voice model, single- and dual-brain calls)
-    ("gemini_live", "prompt_tokens_text"): 0.0,
-    ("gemini_live", "prompt_tokens_audio"): 0.0,
-    ("gemini_live", "response_tokens_text"): 0.0,
-    ("gemini_live", "response_tokens_audio"): 0.0,
-    # Gemini Flash (dual-brain/chat booking brain + hallucination judge)
-    ("gemini_flash", "input_tokens"): 0.0,
-    ("gemini_flash", "output_tokens"): 0.0,
-    # Gemini Flash for the post-call recap (tracked separately)
-    ("gemini_flash_recap", "input_tokens"): 0.0,
-    ("gemini_flash_recap", "output_tokens"): 0.0,
-    # Split-stack providers
-    ("groq", "input_tokens"): 0.0,
-    ("groq", "output_tokens"): 0.0,
-    ("deepgram", "audio_seconds"): 0.0,
-    ("cartesia", "characters"): 0.0,
-    # Meta bills per conversation window; this is a per-message estimate
-    # (0 inside the 24h service window). Override: WHATSAPP_MSG_COST_USD.
-    ("whatsapp", "messages"): 0.0,
+    # Gemini Live — gemini-3.1-flash-live-preview, paid tier
+    # (ai.google.dev/gemini-api/docs/pricing, 2026-09-06): text in
+    # $0.75/1M, audio in $3.00/1M, text out $4.50/1M, audio out $12.00/1M.
+    # NOTE: the Live API re-bills the accumulated session context every
+    # turn, so prompt tokens grow with call length — real billing, not a bug.
+    ("gemini_live", "prompt_tokens_text"): 0.75 / 1e6,
+    ("gemini_live", "prompt_tokens_audio"): 3.00 / 1e6,
+    ("gemini_live", "response_tokens_text"): 4.50 / 1e6,
+    ("gemini_live", "response_tokens_audio"): 12.00 / 1e6,
+    # Gemini Flash — gemini-3.6-flash standard tier (same page):
+    # $0.75/1M in, $3.75/1M out THROUGH 2026-12-31; doubles to
+    # $1.50/$7.50 on 2027-01-01 — update these then.
+    ("gemini_flash", "input_tokens"): 0.75 / 1e6,
+    ("gemini_flash", "output_tokens"): 3.75 / 1e6,
+    ("gemini_flash_recap", "input_tokens"): 0.75 / 1e6,
+    ("gemini_flash_recap", "output_tokens"): 3.75 / 1e6,
+    # Groq — openai/gpt-oss-20b (groq.com/pricing, 2026-09-06):
+    # $0.075/1M in, $0.30/1M out.
+    ("groq", "input_tokens"): 0.075 / 1e6,
+    ("groq", "output_tokens"): 0.30 / 1e6,
+    # Deepgram — nova-3 monolingual STREAMING at the regular $0.0077/min
+    # (deepgram.com/pricing, 2026-09-06; a limited-time promo runs at
+    # $0.0048/min — budget at the regular rate).
+    ("deepgram", "audio_seconds"): 0.0077 / 60,
+    # Cartesia — ~1 credit/char; effective $/char is PLAN-dependent,
+    # roughly $5-$37 per 1M chars (cartesia.ai/pricing, 2026-09-06).
+    # Default is the conservative ~$37/1M; set PRICE_CARTESIA_CHARACTERS
+    # to your plan's real effective rate.
+    ("cartesia", "characters"): 37.0 / 1e6,
+    # WhatsApp India: service/utility messages inside the 24h window are
+    # FREE until 2026-09-30; from 2026-10-01 Meta charges ₹0.115 + 18%
+    # GST ≈ $0.0016/message. Defaulting to the forward rate; set
+    # WHATSAPP_MSG_COST_USD=0 before Oct 2026 for exactness.
+    ("whatsapp", "messages"): 0.0016,
 }
 
 
