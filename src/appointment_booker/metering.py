@@ -42,6 +42,11 @@ class UsageMeter:
         for key, value in (proxy_usage or {}).items():
             self.add("gemini_live", key, value)
 
+    def merge_openai_realtime(self, proxy_usage: dict[str, float]) -> None:
+        """Snapshot OpenAIRealtimeProxy.usage at teardown."""
+        for key, value in (proxy_usage or {}).items():
+            self.add("openai_realtime", key, value)
+
     def merge_split_stack(self, proxy_usage: dict[str, float]) -> None:
         """Snapshot SplitStackProxy.usage at teardown."""
         mapping = {

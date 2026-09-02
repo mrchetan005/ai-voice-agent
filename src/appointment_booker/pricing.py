@@ -36,10 +36,31 @@ PRICES: dict[tuple[str, str], float] = {
     ("gemini_flash", "output_tokens"): 3.75 / 1e6,
     ("gemini_flash_recap", "input_tokens"): 0.75 / 1e6,
     ("gemini_flash_recap", "output_tokens"): 3.75 / 1e6,
+    # OpenAI Realtime — gpt-realtime-2.1 (openai pricing page, 2026-09-06):
+    # text in $4/1M, audio in $32/1M, text out $24/1M, audio out $64/1M.
+    # Totals (input_tokens/output_tokens) stay unpriced — only the
+    # text/audio splits are billed, same pattern as gemini_live.
+    ("openai_realtime", "input_tokens_text"): 4.00 / 1e6,
+    ("openai_realtime", "input_tokens_audio"): 32.00 / 1e6,
+    ("openai_realtime", "output_tokens_text"): 24.00 / 1e6,
+    ("openai_realtime", "output_tokens_audio"): 64.00 / 1e6,
     # Groq — openai/gpt-oss-20b (groq.com/pricing, 2026-09-06):
     # $0.075/1M in, $0.30/1M out.
     ("groq", "input_tokens"): 0.075 / 1e6,
     ("groq", "output_tokens"): 0.30 / 1e6,
+    # OpenAI as the BRAIN llm — rates below are gpt-4o-mini ($0.15/$0.60
+    # per 1M, 2026-09-06); if you pick a different model, override via
+    # PRICE_OPENAI_INPUT_TOKENS / PRICE_OPENAI_OUTPUT_TOKENS.
+    ("openai", "input_tokens"): 0.15 / 1e6,
+    ("openai", "output_tokens"): 0.60 / 1e6,
+    # OpenRouter / custom gateways (LiteLLM etc): per-model pricing varies —
+    # set PRICE_OPENROUTER_* / PRICE_CUSTOM_LLM_* to your model's rate.
+    # Token quantities are always recorded either way; OpenRouter's own
+    # dashboard shows exact spend.
+    ("openrouter", "input_tokens"): 0.0,
+    ("openrouter", "output_tokens"): 0.0,
+    ("custom_llm", "input_tokens"): 0.0,
+    ("custom_llm", "output_tokens"): 0.0,
     # Deepgram — nova-3 monolingual STREAMING at the regular $0.0077/min
     # (deepgram.com/pricing, 2026-09-06; a limited-time promo runs at
     # $0.0048/min — budget at the regular rate).

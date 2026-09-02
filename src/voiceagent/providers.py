@@ -112,6 +112,13 @@ class OpenAIRealtimeProxy(BaseVoiceAgentProxy):
         self._ws: Any = None
         self._active_response_id: str | None = None
         self._response_started_at: float = 0.0
+        # Neutral per-session usage counters (response.done carries usage).
+        self.usage: dict[str, float] = {
+            "input_tokens": 0.0, "input_tokens_text": 0.0,
+            "input_tokens_audio": 0.0, "output_tokens": 0.0,
+            "output_tokens_text": 0.0, "output_tokens_audio": 0.0,
+            "audio_in_seconds": 0.0, "audio_out_seconds": 0.0, "turns": 0.0,
+        }
 
     async def _connect(self) -> None:
         started = time.monotonic()
@@ -161,6 +168,9 @@ class OpenAIRealtimeProxy(BaseVoiceAgentProxy):
 
     async def _uplink_loop(self) -> None:
         async for frame in self.transport.recv_frames():
+            self.usage["audio_in_seconds"] += len(frame.data) / (
+                self.config.input_sample_rate * 2
+            )
             # Base64 JSON is the only audio path on this API (no raw binary).
             # The encode is the one unavoidable copy on this provider.
             await self._ws.send(json.dumps({
@@ -182,7 +192,11 @@ class OpenAIRealtimeProxy(BaseVoiceAgentProxy):
                             (time.monotonic() - self._response_started_at) * 1000.0)
                     self._response_started_at = 0.0
                 self.set_state(SessionState.SPEAKING)
-                self.enqueue_audio(base64.b64decode(event["delta"]))
+                pcm = base64.b64decode(event["delta"])
+                self.usage["audio_out_seconds"] += len(pcm) / (
+                    self.config.output_sample_rate * 2
+                )
+                self.enqueue_audio(pcm)
 
             elif etype == "conversation.item.input_audio_transcription.completed":
                 await self.on_user_transcript(event.get("transcript", ""))
@@ -199,11 +213,31 @@ class OpenAIRealtimeProxy(BaseVoiceAgentProxy):
 
             elif etype == "response.done":
                 self._active_response_id = None
+                self._accumulate_usage(
+                    (event.get("response") or {}).get("usage") or {}
+                )
                 if self.state is SessionState.SPEAKING:
                     self.set_state(SessionState.LISTENING)
 
             elif etype == "error":
                 logger.error("openai realtime error: %s", event.get("error"))
+
+    def _accumulate_usage(self, usage: dict[str, Any]) -> None:
+        """Sum a response.done usage block. Metering must never break the
+        audio path — surprise shapes are logged and ignored."""
+        try:
+            self.usage["input_tokens"] += usage.get("input_tokens", 0) or 0
+            self.usage["output_tokens"] += usage.get("output_tokens", 0) or 0
+            for details_key, prefix in (
+                ("input_token_details", "input_tokens"),
+                ("output_token_details", "output_tokens"),
+            ):
+                details = usage.get(details_key) or {}
+                self.usage[f"{prefix}_text"] += details.get("text_tokens", 0) or 0
+                self.usage[f"{prefix}_audio"] += details.get("audio_tokens", 0) or 0
+            self.usage["turns"] += 1
+        except Exception as exc:
+            logger.debug("realtime usage parse skipped: %r", exc)
 
     async def speak_text(self, text: str, *, interrupt: bool = False) -> None:
         if interrupt:

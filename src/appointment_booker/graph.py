@@ -51,6 +51,56 @@ from appointment_booker.whatsapp_api import WhatsAppClient
 
 logger = logging.getLogger("appointment_booker")
 
+# Brain LLM gateways (all OpenAI-compatible except gemini). BYOK gateways
+# (OpenRouter key vault, a self-hosted LiteLLM proxy) hold the provider
+# keys on THEIR side — here they are just a base_url + one api key.
+_BRAIN_PRESETS: dict[str, tuple[str | None, str]] = {
+    "groq": ("https://api.groq.com/openai/v1", "GROQ_API_KEY"),
+    "openai": (None, "OPENAI_API_KEY"),
+    "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
+}
+
+
+def make_brain_llm(
+    model_spec: str | None = None, temperature: float = 0.6
+) -> tuple[Any, str]:
+    """(llm, cost_provider_label) from a '<provider>/<model>' spec.
+
+    Providers: gemini (default; bare '<model>' means gemini) | groq |
+    openai | openrouter | custom. 'custom' reads SCHEDULER_BASE_URL and
+    SCHEDULER_API_KEY_ENV (default CUSTOM_LLM_API_KEY) — any
+    OpenAI-compatible gateway, e.g. a LiteLLM proxy. The model must
+    support tool calling (the booking brain is a tool agent). Examples:
+        SCHEDULER_MODEL=gemini-3.6-flash
+        SCHEDULER_MODEL=groq/openai/gpt-oss-20b
+        SCHEDULER_MODEL=openrouter/anthropic/claude-sonnet-5
+        SCHEDULER_MODEL=custom/my-litellm-alias
+    """
+    spec = model_spec or os.environ.get("SCHEDULER_MODEL", "gemini-3.6-flash")
+    provider, sep, model = spec.partition("/")
+    if not sep or provider not in (*_BRAIN_PRESETS, "gemini", "custom"):
+        provider, model = "gemini", spec
+    if provider == "gemini":
+        return ChatGoogleGenerativeAI(model=model, temperature=temperature), "gemini_flash"
+
+    from langchain_openai import ChatOpenAI
+
+    if provider == "custom":
+        base_url = os.environ.get("SCHEDULER_BASE_URL")
+        if not base_url:
+            raise RuntimeError("SCHEDULER_MODEL=custom/... needs SCHEDULER_BASE_URL")
+        key_env = os.environ.get("SCHEDULER_API_KEY_ENV", "CUSTOM_LLM_API_KEY")
+        label = "custom_llm"
+    else:
+        base_url, key_env = _BRAIN_PRESETS[provider]
+        label = provider
+    api_key = os.environ.get(key_env)
+    if not api_key:
+        raise RuntimeError(f"brain LLM {spec!r} needs {key_env} set")
+    return ChatOpenAI(
+        model=model, temperature=temperature, base_url=base_url, api_key=api_key
+    ), label
+
 
 class BookingAgent:
     """Checkpointed conversational agent; one instance per process,
@@ -171,10 +221,7 @@ class BookingAgent:
                 service.reschedule(booking_uid, new_start_local_iso)
             ))
 
-        self._llm = ChatGoogleGenerativeAI(
-            model=model or os.environ.get("SCHEDULER_MODEL", "gemini-3.6-flash"),
-            temperature=0.6,
-        )
+        self._llm, self._llm_cost_provider = make_brain_llm(model)
         manage_tools = [
             confirm_email_on_whatsapp, list_my_bookings,
             cancel_appointment, reschedule_appointment,
@@ -379,9 +426,9 @@ class BookingAgent:
                             if self.meter is not None and (
                                 usage := getattr(output, "usage_metadata", None)
                             ):
-                                self.meter.add("gemini_flash", "input_tokens",
+                                self.meter.add(self._llm_cost_provider, "input_tokens",
                                                usage.get("input_tokens", 0))
-                                self.meter.add("gemini_flash", "output_tokens",
+                                self.meter.add(self._llm_cost_provider, "output_tokens",
                                                usage.get("output_tokens", 0))
                             # Gemini 3.x content is a list of parts, not a
                             # plain string; the LAST model turn is the reply

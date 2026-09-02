@@ -22,6 +22,7 @@ booking = [
     "langgraph-checkpoint-postgres>=2.0",
     "psycopg[binary]>=3.2",
     "langchain-google-genai>=2.0",
+    "langchain-openai>=0.2",
     "aiortc>=1.9",
     "aiohttp>=3.10",
 ]

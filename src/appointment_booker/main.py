@@ -8,8 +8,15 @@ Modes:
     uv run --env-file .env appointment-booker --serve-only        # webhook setup
     uv run --env-file .env appointment-booker --permission-only   # send call-permission ask
     --skip-permission   reuse a grant from the last 7 days
+    --provider gemini-live|openai-realtime|split
+                        voice engine; split = Deepgram (multilingual) +
+                        Cartesia, configured via SPLIT_* env knobs
+    --voice rohan|kavita|<id>  voice for the chosen engine
     --brain single|dual single: Gemini Live calls Cal.com tools itself (default,
-                        lowest latency); dual: LangGraph agent behind send_to_agent
+                        lowest latency; gemini-live only); dual: LangGraph agent
+                        behind the voice engine — its LLM comes from
+                        SCHEDULER_MODEL (gemini | groq/... | openai/... |
+                        openrouter/... | custom/... for LiteLLM-style gateways)
 
 Requires a public HTTPS URL for --port (ngrok in dev) configured in the Meta
 App dashboard with WHATSAPP_VERIFY_TOKEN, subscribed to `calls` + `messages`.
@@ -60,9 +67,71 @@ from appointment_booker.webhooks import WebhookHub
 from appointment_booker.whatsapp_api import WhatsAppClient
 from voiceagent import OrchestratorBridge, SessionConfig
 from voiceagent.guardrails_and_eval import GuardrailPipeline, TelemetryRecorder
-from voiceagent.providers import GeminiLiveProxy
+from voiceagent.providers import (
+    GeminiLiveProxy,
+    OpenAIRealtimeProxy,
+    SplitStackProxy,
+)
 
 logger = logging.getLogger("appointment_booker")
+
+# -- provider management -----------------------------------------------------
+# gemini-live: the live model is voice+brain (single) or voice-only (dual).
+# openai-realtime / split: strict voice front-ends with no native booking
+# tools — they ALWAYS run dual-brain behind the LangGraph BookingAgent.
+
+PROVIDERS = ("gemini-live", "openai-realtime", "split")
+
+# (input_sample_rate, output_sample_rate); OpenAI Realtime's wire is 24 kHz
+# both ways — the WhatsApp transport resamples either geometry to Opus 48 k.
+_PROVIDER_RATES: dict[str, tuple[int, int]] = {
+    "gemini-live": (16_000, 24_000),
+    "openai-realtime": (24_000, 24_000),
+    "split": (16_000, 24_000),
+}
+
+# Friendly Cartesia voice aliases; anything else passes through verbatim
+# (Gemini prebuilt names like Despina, OpenAI voices like marin, raw ids).
+VOICE_ALIASES = {
+    "rohan": "4877b818-c7fe-4c89-b1cf-eadf8e23da72",
+    "kavita": "56e35e2d-6eb6-4226-ab8b-9776515a7094",
+}
+
+
+def _resolve_voice(arg: str | None) -> str | None:
+    voice = arg or os.environ.get("VOICEAGENT_VOICE_ID") or None
+    return VOICE_ALIASES.get(voice.lower(), voice) if voice else None
+
+
+def _resolve_brain(provider: str, requested: str) -> str:
+    if provider != "gemini-live" and requested == "single":
+        logger.info("%s has no native booking tools — using dual brain", provider)
+        return "dual"
+    return requested
+
+
+def _split_provider_options() -> dict:
+    """Split-stack knobs from env. ASR defaults to Deepgram nova-3
+    MULTILINGUAL — callers here code-switch between English and Indian
+    languages mid-sentence."""
+    opts: dict = {
+        "asr": os.environ.get("SPLIT_ASR", "deepgram"),
+        "tts": os.environ.get("SPLIT_TTS", "cartesia"),
+        "asr_language": os.environ.get("SPLIT_ASR_LANGUAGE", "multi"),
+    }
+    if model := os.environ.get("SPLIT_ASR_MODEL"):
+        opts["asr_model"] = model
+    if model := os.environ.get("SPLIT_TTS_MODEL"):
+        opts["tts_model"] = model
+    return opts
+
+
+def _build_proxy(provider: str, config: SessionConfig, transport):
+    if provider == "openai-realtime":
+        return OpenAIRealtimeProxy(config, transport)
+    if provider == "split":
+        return SplitStackProxy(config, transport)
+    return GeminiLiveProxy(config, transport)
 
 
 async def _signal_end(hub: WebhookHub) -> None:
@@ -224,6 +293,11 @@ async def _single_brain_setup(
 async def run_inbound(args: argparse.Namespace) -> int:
     """Answer loop: wait for users to CALL the business number, pick up,
     run a single-brain session, repeat. One call at a time (v1)."""
+    if args.provider != "gemini-live":
+        print("--inbound currently supports gemini-live only (single-brain "
+              "native tools); use the default outbound mode to test "
+              f"{args.provider}")
+        return 2
     hub = WebhookHub(port=args.port)
     await hub.start()
     wa = WhatsAppClient()
@@ -475,11 +549,13 @@ async def run(args: argparse.Namespace) -> int:
         business = os.environ.get("BUSINESS_NAME", "our office")
         session_store = SessionStore(os.environ["DATABASE_URL"])
         await session_store.connect()
-        meter = UsageMeter(uuid.uuid4().hex, recipient, "voice-outbound", args.brain)
+        brain = _resolve_brain(args.provider, args.brain)
+        input_rate, output_rate = _PROVIDER_RATES[args.provider]
+        meter = UsageMeter(uuid.uuid4().hex, recipient, "voice-outbound", brain)
         provider_options: dict = {}
         call: BookingCall | None = None
 
-        if args.brain == "single":
+        if brain == "single":
             system_prompt, provider_options, transcript_store, text_bridge, service = (
                 await _single_brain_setup(
                     cal, wa, hub, recipient, event_type_id, timezone, business,
@@ -503,19 +579,25 @@ async def run(args: argparse.Namespace) -> int:
             await booking_agent.start()
 
         service.meter = meter
-        transport = WhatsAppCallTransport(wa, hub, recipient)
-        print(f"placing WhatsApp call… (brain={args.brain})")
+        transport = WhatsAppCallTransport(
+            wa, hub, recipient,
+            input_sample_rate=input_rate, output_sample_rate=output_rate,
+        )
+        print(f"placing WhatsApp call… (provider={args.provider}, brain={brain})")
         await transport.place_call()
 
+        if args.provider == "split":
+            provider_options.update(_split_provider_options())
         config = SessionConfig(
             language=os.environ.get("VOICEAGENT_LANGUAGE", "en-IN"),
             tone="warm",
             system_prompt=system_prompt,
-            input_sample_rate=16_000,   # Gemini Live input
-            output_sample_rate=24_000,  # Gemini Live output
+            voice_id=_resolve_voice(args.voice),
+            input_sample_rate=input_rate,
+            output_sample_rate=output_rate,
             provider_options=provider_options,
         )
-        proxy = GeminiLiveProxy(config, transport)
+        proxy = _build_proxy(args.provider, config, transport)
         telemetry = TelemetryRecorder(config.session_id)
         proxy.telemetry = telemetry
 
@@ -523,7 +605,7 @@ async def run(args: argparse.Namespace) -> int:
             text_bridge.attach(lambda text: _inject_chat_text(proxy, text))
             text_bridge.start()
 
-        if args.brain == "dual":
+        if brain == "dual":
             # thread_id = caller's number: dropped calls resume, repeat
             # callers remembered (state in Neon).
             call = BookingCall(booking_agent, thread_id=f"wa-{recipient.lstrip('+')}")
@@ -564,7 +646,12 @@ async def run(args: argparse.Namespace) -> int:
             else []
         )
         await _send_recap(wa, recipient, business, turns, service, meter)
-        meter.merge_gemini_live(proxy.usage)
+        if args.provider == "openai-realtime":
+            meter.merge_openai_realtime(proxy.usage)
+        elif args.provider == "split":
+            meter.merge_split_stack(proxy.usage)
+        else:
+            meter.merge_gemini_live(proxy.usage)
         await _record_session(
             session_store, meter,
             turns=turns, service=service,
@@ -602,9 +689,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--permission-only", action="store_true", help="send permission request and exit")
     parser.add_argument("--skip-permission", action="store_true", help="permission already granted")
     parser.add_argument(
+        "--provider", choices=PROVIDERS, default="gemini-live",
+        help="voice engine: gemini-live (default; supports single brain), "
+             "openai-realtime, or split (Deepgram STT + Cartesia TTS; "
+             "SPLIT_* env knobs; both force dual brain)",
+    )
+    parser.add_argument(
+        "--voice", default=None,
+        help="voice for the engine: rohan/kavita (Cartesia aliases), a raw "
+             "Cartesia voice id, a Gemini prebuilt name, or an OpenAI voice; "
+             "defaults to VOICEAGENT_VOICE_ID or the engine default",
+    )
+    parser.add_argument(
         "--brain", choices=("single", "dual"), default="single",
-        help="single: Gemini Live calls tools directly (lowest latency); "
-             "dual: LangGraph agent behind send_to_agent (Neon-checkpointed)",
+        help="single: Gemini Live calls tools directly (lowest latency; "
+             "gemini-live only); dual: LangGraph agent behind the voice "
+             "engine (Neon-checkpointed; SCHEDULER_MODEL picks its LLM)",
     )
     parser.add_argument(
         "--inbound", action="store_true",
