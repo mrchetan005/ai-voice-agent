@@ -76,7 +76,10 @@ def make_brain_llm(
         SCHEDULER_MODEL=openrouter/anthropic/claude-sonnet-5
         SCHEDULER_MODEL=custom/my-litellm-alias
     """
-    spec = model_spec or os.environ.get("SCHEDULER_MODEL", "gemini-3.6-flash")
+    from appointment_booker.config import get_settings
+
+    settings = get_settings()
+    spec = model_spec or settings.scheduler_model
     provider, sep, model = spec.partition("/")
     if not sep or provider not in (*_BRAIN_PRESETS, "gemini", "custom"):
         provider, model = "gemini", spec
@@ -86,10 +89,10 @@ def make_brain_llm(
     from langchain_openai import ChatOpenAI
 
     if provider == "custom":
-        base_url = os.environ.get("SCHEDULER_BASE_URL")
+        base_url = settings.scheduler_base_url
         if not base_url:
             raise RuntimeError("SCHEDULER_MODEL=custom/... needs SCHEDULER_BASE_URL")
-        key_env = os.environ.get("SCHEDULER_API_KEY_ENV", "CUSTOM_LLM_API_KEY")
+        key_env = settings.scheduler_api_key_env
         label = "custom_llm"
     else:
         base_url, key_env = _BRAIN_PRESETS[provider]
@@ -129,7 +132,9 @@ class BookingAgent:
         self._event_type_id = event_type_id
         self._tz = ZoneInfo(timezone)
         self._tz_name = timezone
-        self._db_url = db_url or os.environ["DATABASE_URL"]
+        from appointment_booker.config import get_settings
+
+        self._db_url = db_url or get_settings().database_url
         self._agent: Any = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._persist_task: asyncio.Task[None] | None = None
@@ -501,14 +506,16 @@ class BookingAgent:
 
 async def _self_check(utterance: str) -> int:
     from appointment_booker.booking_service import create_booking_service
+    from appointment_booker.config import get_settings
 
     logging.basicConfig(level=logging.INFO)
+    settings = get_settings()
     cal = CalClient()
     wa = WhatsAppClient()
     hub = WebhookHub()  # not started: email tool unused in this check
-    recipient = os.environ["WHATSAPP_RECIPIENT"]
-    event_type_id = int(os.environ["CAL_EVENT_TYPE_ID"])
-    timezone = os.environ.get("CAL_TIMEZONE", "Asia/Kolkata")
+    recipient = settings.whatsapp_recipient
+    event_type_id = settings.cal_event_type_id
+    timezone = settings.cal_timezone
     service = await create_booking_service(
         cal, wa, hub, recipient, event_type_id, timezone, "self-check"
     )

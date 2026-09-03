@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import sys
 from typing import Any
 
@@ -32,8 +31,11 @@ class WhatsAppClient:
         phone_number_id: str | None = None,
         access_token: str | None = None,
     ) -> None:
-        self.phone_number_id = phone_number_id or os.environ.get("WHATSAPP_PHONE_NUMBER_ID") or ""
-        token = access_token or os.environ.get("WHATSAPP_ACCESS_TOKEN") or ""
+        from appointment_booker.config import get_settings
+
+        settings = get_settings()
+        self.phone_number_id = phone_number_id or settings.whatsapp_phone_number_id
+        token = access_token or settings.whatsapp_access_token
         if not self.phone_number_id or not token:
             raise RuntimeError("WHATSAPP_PHONE_NUMBER_ID / WHATSAPP_ACCESS_TOKEN missing")
         self._http = httpx.AsyncClient(
@@ -164,8 +166,10 @@ class WhatsAppClient:
 async def _self_check() -> int:
     import json
 
+    from appointment_booker.config import get_settings
+
     wa = WhatsAppClient()
-    to = os.environ["WHATSAPP_RECIPIENT"]
+    to = get_settings().whatsapp_recipient
     result = await wa.send_text(to, "voiceagent appointment-booker: connectivity check ✅")
     print(f"[ok] text sent to {to}: {result.get('messages', [{}])[0].get('id', '?')}")
     try:

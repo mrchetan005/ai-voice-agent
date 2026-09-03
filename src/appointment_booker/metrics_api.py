@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-import os
 from typing import Any
 
 from aiohttp import web
@@ -47,7 +46,9 @@ class MetricsAPI:
         self._session_store: SessionStore | None = None
 
     def _auth(self, request: web.Request) -> web.Response | None:
-        token = os.environ.get("METRICS_TOKEN")
+        from appointment_booker.config import get_settings
+
+        token = get_settings().metrics_token
         if not token:
             return web.json_response({"error": "not found"}, status=404)
         if request.headers.get("Authorization") != f"Bearer {token}":
@@ -56,9 +57,11 @@ class MetricsAPI:
 
     async def _store(self) -> SessionStore | None:
         # Lazy + cached-only-when-connected, so a DB blip retries next call.
+        from appointment_booker.config import get_settings
+
         if self._session_store is not None:
             return self._session_store
-        db_url = os.environ.get("DATABASE_URL")
+        db_url = get_settings().database_url
         if not db_url:
             return None
         store = SessionStore(db_url)

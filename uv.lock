@@ -4525,6 +4525,7 @@ booking = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint-postgres" },
     { name = "psycopg", extra = ["binary"] },
+    { name = "pydantic-settings" },
 ]
 crewai = [
     { name = "crewai" },
@@ -4549,6 +4550,7 @@ requires-dist = [
     { name = "langgraph-checkpoint-postgres", marker = "extra == 'booking'", specifier = ">=2.0" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'booking'", specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.7" },
+    { name = "pydantic-settings", marker = "extra == 'booking'", specifier = ">=2.4" },
     { name = "sounddevice", marker = "extra == 'local'", specifier = ">=0.5" },
     { name = "websockets", specifier = ">=12" },
 ]

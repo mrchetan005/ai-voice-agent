@@ -30,7 +30,6 @@ import contextlib
 import datetime as dt
 import json
 import logging
-import os
 import re
 import sys
 import uuid
@@ -41,6 +40,7 @@ from appointment_booker.booking_service import (
     create_booking_service,
 )
 from appointment_booker.cal_client import CalClient
+from appointment_booker.config import get_settings, logging_setup
 from appointment_booker.graph import BookingAgent
 from appointment_booker.metering import (
     ChatSessionTracker,
@@ -99,7 +99,7 @@ VOICE_ALIASES = {
 
 
 def _resolve_voice(arg: str | None) -> str | None:
-    voice = arg or os.environ.get("VOICEAGENT_VOICE_ID") or None
+    voice = arg or get_settings().voiceagent_voice_id or None
     return VOICE_ALIASES.get(voice.lower(), voice) if voice else None
 
 
@@ -111,18 +111,19 @@ def _resolve_brain(provider: str, requested: str) -> str:
 
 
 def _split_provider_options() -> dict:
-    """Split-stack knobs from env. ASR defaults to Deepgram nova-3
+    """Split-stack knobs from settings. ASR defaults to Deepgram nova-3
     MULTILINGUAL — callers here code-switch between English and Indian
     languages mid-sentence."""
+    settings = get_settings()
     opts: dict = {
-        "asr": os.environ.get("SPLIT_ASR", "deepgram"),
-        "tts": os.environ.get("SPLIT_TTS", "cartesia"),
-        "asr_language": os.environ.get("SPLIT_ASR_LANGUAGE", "multi"),
+        "asr": settings.split_asr,
+        "tts": settings.split_tts,
+        "asr_language": settings.split_asr_language,
     }
-    if model := os.environ.get("SPLIT_ASR_MODEL"):
-        opts["asr_model"] = model
-    if model := os.environ.get("SPLIT_TTS_MODEL"):
-        opts["tts_model"] = model
+    if settings.split_asr_model:
+        opts["asr_model"] = settings.split_asr_model
+    if settings.split_tts_model:
+        opts["tts_model"] = settings.split_tts_model
     return opts
 
 
@@ -232,7 +233,7 @@ async def _single_brain_setup(
     # Transcripts: Gemini's transcription events -> async Neon writes
     # (never blocks the audio path).
     transcript_store = TranscriptStore(
-        f"wa-{caller.lstrip('+')}", os.environ["DATABASE_URL"]
+        f"wa-{caller.lstrip('+')}", get_settings().database_url
     )
     await transcript_store.connect()
 
@@ -298,14 +299,15 @@ async def run_inbound(args: argparse.Namespace) -> int:
               "native tools); use the default outbound mode to test "
               f"{args.provider}")
         return 2
+    settings = get_settings()
     hub = WebhookHub(port=args.port)
     await hub.start()
     wa = WhatsAppClient()
     cal = CalClient()
-    event_type_id = int(os.environ["CAL_EVENT_TYPE_ID"])
-    timezone = os.environ.get("CAL_TIMEZONE", "Asia/Kolkata")
-    business = os.environ.get("BUSINESS_NAME", "our office")
-    session_store = SessionStore(os.environ["DATABASE_URL"])
+    event_type_id = settings.cal_event_type_id
+    timezone = settings.cal_timezone
+    business = settings.business_name
+    session_store = SessionStore(settings.database_url)
     await session_store.connect()
     try:
         try:
@@ -316,7 +318,7 @@ async def run_inbound(args: argparse.Namespace) -> int:
               "WhatsApp and tap the call button")
         while True:
             incoming = await hub.incoming_calls.get()
-            caller = incoming.from_number or os.environ["WHATSAPP_RECIPIENT"]
+            caller = incoming.from_number or settings.whatsapp_recipient
             print(f"incoming call from {caller}")
             hub.call_ended.clear()
 
@@ -336,7 +338,7 @@ async def run_inbound(args: argparse.Namespace) -> int:
                 await transport.answer_call(incoming.call_id, incoming.sdp)
 
                 config = SessionConfig(
-                    language=os.environ.get("VOICEAGENT_LANGUAGE", "en-IN"),
+                    language=settings.voiceagent_language,
                     tone="warm",
                     system_prompt=system_prompt,
                     input_sample_rate=16_000,
@@ -395,14 +397,15 @@ async def run_chat(args: argparse.Namespace) -> int:
     """WhatsApp TEXT booking: every inbound message goes through the same
     checkpointed BookingAgent (channel='chat'). Threads are per sender and
     shared with voice calls — the agent remembers callers across channels."""
+    settings = get_settings()
     hub = WebhookHub(port=args.port)
     await hub.start()
     wa = WhatsAppClient()
     cal = CalClient()
-    event_type_id = int(os.environ["CAL_EVENT_TYPE_ID"])
-    timezone = os.environ.get("CAL_TIMEZONE", "Asia/Kolkata")
-    business = os.environ.get("BUSINESS_NAME", "our office")
-    session_store = SessionStore(os.environ["DATABASE_URL"])
+    event_type_id = settings.cal_event_type_id
+    timezone = settings.cal_timezone
+    business = settings.business_name
+    session_store = SessionStore(settings.database_url)
     await session_store.connect()
     # ponytail: one BookingAgent (+ its own DB conn) per sender; fine for the
     # 5-recipient test allowlist — pool connections if this goes multi-tenant.
@@ -508,12 +511,13 @@ async def run(args: argparse.Namespace) -> int:
     hub = WebhookHub(port=args.port)
     await hub.start()
 
+    settings = get_settings()
     if args.serve_only:
         print(f"webhook listening on :{args.port}/webhook — expose with: ngrok http {args.port}")
         print("then set the URL + WHATSAPP_VERIFY_TOKEN in the Meta App dashboard")
         await asyncio.Future()
 
-    recipient = os.environ["WHATSAPP_RECIPIENT"]  # required for call modes only
+    recipient = settings.whatsapp_recipient  # required for call modes only
 
     wa = WhatsAppClient()
     cal: CalClient | None = None
@@ -544,10 +548,10 @@ async def run(args: argparse.Namespace) -> int:
                 return 0 if accepted else 1
 
         cal = CalClient()
-        event_type_id = int(os.environ["CAL_EVENT_TYPE_ID"])
-        timezone = os.environ.get("CAL_TIMEZONE", "Asia/Kolkata")
-        business = os.environ.get("BUSINESS_NAME", "our office")
-        session_store = SessionStore(os.environ["DATABASE_URL"])
+        event_type_id = settings.cal_event_type_id
+        timezone = settings.cal_timezone
+        business = settings.business_name
+        session_store = SessionStore(settings.database_url)
         await session_store.connect()
         brain = _resolve_brain(args.provider, args.brain)
         input_rate, output_rate = _PROVIDER_RATES[args.provider]
@@ -589,7 +593,7 @@ async def run(args: argparse.Namespace) -> int:
         if args.provider == "split":
             provider_options.update(_split_provider_options())
         config = SessionConfig(
-            language=os.environ.get("VOICEAGENT_LANGUAGE", "en-IN"),
+            language=settings.voiceagent_language,
             tone="warm",
             system_prompt=system_prompt,
             voice_id=_resolve_voice(args.voice),
@@ -719,7 +723,7 @@ def parse_args() -> argparse.Namespace:
 
 def cli() -> None:
     """Console entry point (`appointment-booker` after install)."""
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    logging_setup()
     if sys.platform == "win32":
         # psycopg async (Neon checkpointer) cannot run on ProactorEventLoop.
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())

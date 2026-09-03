@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from typing import Any
 
 from aiohttp import web
@@ -56,7 +55,9 @@ class ButtonReply(BaseModel):
 
 class WebhookHub:
     def __init__(self, verify_token: str | None = None, port: int = 8080) -> None:
-        self._verify_token = verify_token or os.environ.get("WHATSAPP_VERIFY_TOKEN", "voiceagent")
+        from appointment_booker.config import get_settings
+
+        self._verify_token = verify_token or get_settings().whatsapp_verify_token
         self._port = port
         self.call_answers: asyncio.Queue[CallEvent] = asyncio.Queue(maxsize=8)
         # Inbound (user-initiated) calls: connect events carrying an SDP OFFER.

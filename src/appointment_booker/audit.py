@@ -16,7 +16,6 @@ import asyncio
 import datetime as dt
 import json
 import logging
-import os
 import re
 import sys
 from typing import Any
@@ -113,8 +112,11 @@ async def run_audit(
     days: int, sample: int, model: str | None = None,
     dry_run: bool = False, llm: Any = None, store: Any = None,
 ) -> int:
+    from appointment_booker.config import get_settings
+
+    settings = get_settings()
     if store is None:
-        store = SessionStore(os.environ["DATABASE_URL"])
+        store = SessionStore(settings.database_url)
         await store.connect()
     try:
         since = dt.datetime.now(dt.UTC) - dt.timedelta(days=days)
@@ -126,7 +128,7 @@ async def run_audit(
             from langchain_google_genai import ChatGoogleGenerativeAI
 
             llm = ChatGoogleGenerativeAI(
-                model=model or os.environ.get("JUDGE_MODEL", "gemini-3.6-flash"),
+                model=model or settings.judge_model,
                 temperature=0,
             )
         audited = 0

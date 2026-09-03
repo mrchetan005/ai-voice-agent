@@ -10,7 +10,6 @@ Self-check (live, read-only):
 from __future__ import annotations
 
 import json
-import os
 import sys
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -28,7 +27,9 @@ V_EVENT_TYPES = "2024-06-14"
 
 class CalClient:
     def __init__(self, api_key: str | None = None, timeout: float = 20.0) -> None:
-        self._key = api_key or os.environ.get("CAL_API_KEY") or ""
+        from appointment_booker.config import get_settings
+
+        self._key = api_key or get_settings().cal_api_key
         if not self._key:
             raise RuntimeError("CAL_API_KEY missing")
         self._http = httpx.Client(base_url=BASE, timeout=timeout)
@@ -153,8 +154,11 @@ def _self_check() -> int:
             f"({et.get('lengthInMinutes') or et.get('length')} min)"
         )
 
-    et_id = int(os.environ.get("CAL_EVENT_TYPE_ID") or event_types[0]["id"])
-    org_tz = ZoneInfo(os.environ.get("CAL_TIMEZONE", "Asia/Kolkata"))
+    from appointment_booker.config import get_settings
+
+    settings = get_settings()
+    et_id = settings.cal_event_type_id or int(event_types[0]["id"])
+    org_tz = ZoneInfo(settings.cal_timezone)
     tomorrow = datetime.now(org_tz).date() + timedelta(days=1)
     slots = cal.get_slots(et_id, tomorrow, tomorrow + timedelta(days=2))
     total = sum(len(v) for v in slots.values())

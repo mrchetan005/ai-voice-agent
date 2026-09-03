@@ -11,7 +11,6 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
-import os
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -32,15 +31,17 @@ class RecapSender:
         llm: Any = None,  # injectable for tests; else built on first send
         meter: Any = None,  # optional UsageMeter for cost accounting
     ) -> None:
+        from appointment_booker.config import get_settings
+
+        settings = get_settings()
         self._wa = wa
         self._recipient = recipient
         self._business = business_name
         self._meter = meter
-        self._model_name = model_name or os.environ.get("RECAP_MODEL") \
-            or os.environ.get("SCHEDULER_MODEL", "gemini-3.6-flash")
+        self._model_name = model_name or settings.recap_model or settings.scheduler_model
         self._min_user_turns = (
             min_user_turns if min_user_turns is not None
-            else int(os.environ.get("RECAP_MIN_USER_TURNS", "2"))
+            else settings.recap_min_user_turns
         )
         self._llm = llm
         self._sent = False
@@ -70,7 +71,9 @@ class RecapSender:
                 "actions_this_call": session_actions,
                 "upcoming_bookings": upcoming or [],
             }
-            business_tz = ZoneInfo(os.environ.get("CAL_TIMEZONE", "Asia/Kolkata"))
+            from appointment_booker.config import get_settings
+
+            business_tz = ZoneInfo(get_settings().cal_timezone)
             system = CALL_RECAP_PROMPT.format(
                 business_name=self._business,
                 date=dt.datetime.now(business_tz).strftime("%d %B %Y"),
