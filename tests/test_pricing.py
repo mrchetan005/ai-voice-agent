@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import sys
 
-from appointment_booker.pricing import PRICES, compute_cost, effective_prices
+from whatsapp_agent.infra.pricing import PRICES, compute_cost, effective_prices
 
 
 def main() -> int:

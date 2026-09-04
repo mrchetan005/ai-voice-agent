@@ -14,10 +14,10 @@ import logging
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from appointment_booker.prompts import CALL_RECAP_PROMPT
-from appointment_booker.whatsapp_api import WhatsAppClient
+from whatsapp_agent.agent.prompts import CALL_RECAP_PROMPT
+from whatsapp_agent.channels.client import WhatsAppClient
 
-logger = logging.getLogger("appointment_booker")
+logger = logging.getLogger("whatsapp_agent")
 
 
 class RecapSender:
@@ -31,7 +31,7 @@ class RecapSender:
         llm: Any = None,  # injectable for tests; else built on first send
         meter: Any = None,  # optional UsageMeter for cost accounting
     ) -> None:
-        from appointment_booker.config import get_settings
+        from whatsapp_agent.config import get_settings
 
         settings = get_settings()
         self._wa = wa
@@ -71,7 +71,7 @@ class RecapSender:
                 "actions_this_call": session_actions,
                 "upcoming_bookings": upcoming or [],
             }
-            from appointment_booker.config import get_settings
+            from whatsapp_agent.config import get_settings
 
             business_tz = ZoneInfo(get_settings().cal_timezone)
             system = CALL_RECAP_PROMPT.format(

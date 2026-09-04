@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import sys
 
-from appointment_booker.webhooks import WebhookHub
+from whatsapp_agent.channels.events import WebhookHub
 
 
 async def main() -> int:

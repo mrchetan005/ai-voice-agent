@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import sys
 
-from appointment_booker.recap import RecapSender
+from whatsapp_agent.agent.recap import RecapSender
 
 
 class FakeWA:

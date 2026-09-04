@@ -18,9 +18,9 @@ from typing import Any
 
 from aiohttp import web
 
-from appointment_booker.stores import SessionStore
+from whatsapp_agent.infra.stores import SessionStore
 
-logger = logging.getLogger("appointment_booker")
+logger = logging.getLogger("whatsapp_agent")
 
 _MAX_DAYS = 366
 
@@ -46,7 +46,7 @@ class MetricsAPI:
         self._session_store: SessionStore | None = None
 
     def _auth(self, request: web.Request) -> web.Response | None:
-        from appointment_booker.config import get_settings
+        from whatsapp_agent.config import get_settings
 
         token = get_settings().metrics_token
         if not token:
@@ -57,7 +57,7 @@ class MetricsAPI:
 
     async def _store(self) -> SessionStore | None:
         # Lazy + cached-only-when-connected, so a DB blip retries next call.
-        from appointment_booker.config import get_settings
+        from whatsapp_agent.config import get_settings
 
         if self._session_store is not None:
             return self._session_store

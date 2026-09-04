@@ -11,9 +11,9 @@ import sys
 
 import httpx
 
-from appointment_booker.metering import UsageMeter, derive_outcome
 from voiceagent.models import SessionConfig
 from voiceagent.providers import GeminiLiveProxy, OpenAICompatLLM
+from whatsapp_agent.infra.metering import UsageMeter, derive_outcome
 
 
 class DummyTransport:

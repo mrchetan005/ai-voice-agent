@@ -14,7 +14,7 @@ import sys
 
 from aiohttp.test_utils import make_mocked_request
 
-from appointment_booker.metrics_api import MetricsAPI
+from whatsapp_agent.api.routes.admin import MetricsAPI
 
 NOW = dt.datetime.now(dt.UTC)
 

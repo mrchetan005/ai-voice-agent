@@ -10,20 +10,20 @@ from __future__ import annotations
 import os
 import sys
 
-from appointment_booker.main import (
-    _PROVIDER_RATES,
-    _build_proxy,
-    _resolve_brain,
-    _resolve_voice,
-    _split_provider_options,
-)
-from appointment_booker.metering import UsageMeter
 from voiceagent.models import SessionConfig
 from voiceagent.providers import (
     GeminiLiveProxy,
     OpenAIRealtimeProxy,
     SplitStackProxy,
 )
+from whatsapp_agent.cli import (
+    _PROVIDER_RATES,
+    _build_proxy,
+    _resolve_brain,
+    _resolve_voice,
+    _split_provider_options,
+)
+from whatsapp_agent.infra.metering import UsageMeter
 
 ROHAN = "4877b818-c7fe-4c89-b1cf-eadf8e23da72"
 
@@ -99,7 +99,7 @@ def main() -> int:
         del os.environ["VOICEAGENT_VOICE_ID"]
 
     # -- brain LLM factory -----------------------------------------------------------
-    from appointment_booker.graph import make_brain_llm
+    from whatsapp_agent.agent.brain import make_brain_llm
 
     os.environ.setdefault("GOOGLE_API_KEY", "fake-for-offline-test")
     os.environ["GROQ_API_KEY"] = os.environ.get("GROQ_API_KEY") or "fake"

@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import sys
 
-from appointment_booker.audit import _parse_verdict, deterministic_flags, run_audit
+from whatsapp_agent.agent.audit import _parse_verdict, deterministic_flags, run_audit
 
 BOOKED = [{"action": "booked", "uid": "u1"}]
 

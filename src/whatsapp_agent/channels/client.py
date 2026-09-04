@@ -8,7 +8,7 @@ Business-initiated call flow (verified Aug 2026):
   5. terminate_call(call_id)
 
 Sanity check (sends a real WhatsApp text to WHATSAPP_RECIPIENT):
-    uv run --env-file .env python -m appointment_booker.whatsapp_api
+    uv run --env-file .env python -m whatsapp_agent.channels.client
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from typing import Any
 
 import httpx
 
-logger = logging.getLogger("appointment_booker")
+logger = logging.getLogger("whatsapp_agent")
 
 GRAPH = "https://graph.facebook.com/v24.0"
 
@@ -31,7 +31,7 @@ class WhatsAppClient:
         phone_number_id: str | None = None,
         access_token: str | None = None,
     ) -> None:
-        from appointment_booker.config import get_settings
+        from whatsapp_agent.config import get_settings
 
         settings = get_settings()
         self.phone_number_id = phone_number_id or settings.whatsapp_phone_number_id
@@ -166,7 +166,7 @@ class WhatsAppClient:
 async def _self_check() -> int:
     import json
 
-    from appointment_booker.config import get_settings
+    from whatsapp_agent.config import get_settings
 
     wa = WhatsAppClient()
     to = get_settings().whatsapp_recipient

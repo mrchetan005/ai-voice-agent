@@ -34,5 +34,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s CMD \
 exec('try: urllib.request.urlopen(\"http://127.0.0.1:8080/webhook\", timeout=3)\nexcept urllib.error.HTTPError: pass\nexcept Exception: sys.exit(1)')"
 
 # Config via env (.env is NOT baked in — pass with --env-file at run time).
-ENTRYPOINT ["appointment-booker"]
+ENTRYPOINT ["whatsapp-agent"]
 CMD ["--inbound"]

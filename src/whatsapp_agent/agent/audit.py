@@ -4,7 +4,7 @@ Two layers:
 1. `deterministic_flags` — free rule checks run on EVERY session at write
    time, each grounded in a hard fact (API results, store state, math).
 2. A sampled LLM judge, run manually via CLI (credit-frugal):
-       uv run --env-file .env python -m appointment_booker.audit --days 7 --sample 10
+       uv run --env-file .env python -m whatsapp_agent.agent.audit --days 7 --sample 10
    Flagged sessions are sampled first; verdicts land in
    voiceagent_sessions.audit as strict JSON.
 """
@@ -20,10 +20,10 @@ import re
 import sys
 from typing import Any
 
-from appointment_booker.prompts import HALLUCINATION_JUDGE_PROMPT
-from appointment_booker.stores import SessionStore
+from whatsapp_agent.agent.prompts import HALLUCINATION_JUDGE_PROMPT
+from whatsapp_agent.infra.stores import SessionStore
 
-logger = logging.getLogger("appointment_booker")
+logger = logging.getLogger("whatsapp_agent")
 
 # Assistant statements that CLAIM a completed booking. Questions and
 # negations are excluded — the flag fires only when a completion claim has
@@ -112,7 +112,7 @@ async def run_audit(
     days: int, sample: int, model: str | None = None,
     dry_run: bool = False, llm: Any = None, store: Any = None,
 ) -> int:
-    from appointment_booker.config import get_settings
+    from whatsapp_agent.config import get_settings
 
     settings = get_settings()
     if store is None:

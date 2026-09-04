@@ -22,12 +22,12 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from appointment_booker.cal_client import CalClient
-from appointment_booker.stores import BookingStore, ProfileStore
-from appointment_booker.webhooks import WebhookHub
-from appointment_booker.whatsapp_api import WhatsAppClient
+from whatsapp_agent.capabilities.booking.cal_client import CalClient
+from whatsapp_agent.channels.client import WhatsAppClient
+from whatsapp_agent.channels.events import WebhookHub
+from whatsapp_agent.infra.stores import BookingStore, ProfileStore
 
-logger = logging.getLogger("appointment_booker")
+logger = logging.getLogger("whatsapp_agent")
 
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
 
@@ -323,7 +323,7 @@ async def create_booking_service(
     """Construct + connect stores, load the caller profile, pre-seed the
     confirmed email from it (the prompt makes the agent verbally re-confirm
     a stored email before booking with it)."""
-    from appointment_booker.config import get_settings
+    from whatsapp_agent.config import get_settings
 
     db_url = get_settings().database_url
     profile_store = ProfileStore(db_url)

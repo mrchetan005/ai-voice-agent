@@ -12,11 +12,11 @@ import logging
 import uuid
 from typing import Any
 
-from appointment_booker.audit import deterministic_flags
-from appointment_booker.pricing import compute_cost
-from appointment_booker.stores import SessionStore
+from whatsapp_agent.agent.audit import deterministic_flags
+from whatsapp_agent.infra.pricing import compute_cost
+from whatsapp_agent.infra.stores import SessionStore
 
-logger = logging.getLogger("appointment_booker")
+logger = logging.getLogger("whatsapp_agent")
 
 
 class UsageMeter:

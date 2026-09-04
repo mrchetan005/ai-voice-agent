@@ -13,7 +13,7 @@ import datetime as dt
 import os
 import sys
 
-from appointment_booker.stores import BookingStore, ProfileStore
+from whatsapp_agent.infra.stores import BookingStore, ProfileStore
 
 PHONE = "test-919000000001"
 

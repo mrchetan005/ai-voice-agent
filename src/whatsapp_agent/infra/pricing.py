@@ -17,7 +17,7 @@ import logging
 import os
 from typing import Any
 
-logger = logging.getLogger("appointment_booker")
+logger = logging.getLogger("whatsapp_agent")
 
 PRICES: dict[tuple[str, str], float] = {
     # Gemini Live — gemini-3.1-flash-live-preview, paid tier

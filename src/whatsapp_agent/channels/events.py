@@ -22,9 +22,9 @@ from typing import Any
 from aiohttp import web
 from pydantic import BaseModel
 
-from appointment_booker.metrics_api import MetricsAPI
+from whatsapp_agent.api.routes.admin import MetricsAPI
 
-logger = logging.getLogger("appointment_booker")
+logger = logging.getLogger("whatsapp_agent")
 
 
 class CallEvent(BaseModel):
@@ -55,7 +55,7 @@ class ButtonReply(BaseModel):
 
 class WebhookHub:
     def __init__(self, verify_token: str | None = None, port: int = 8080) -> None:
-        from appointment_booker.config import get_settings
+        from whatsapp_agent.config import get_settings
 
         self._verify_token = verify_token or get_settings().whatsapp_verify_token
         self._port = port

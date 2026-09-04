@@ -11,10 +11,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from appointment_booker.graph import BookingAgent
-from appointment_booker.prompts import DUAL_BRAIN_GREET_TRIGGER
+from whatsapp_agent.agent.brain import BookingAgent
+from whatsapp_agent.agent.prompts import DUAL_BRAIN_GREET_TRIGGER
 
-logger = logging.getLogger("appointment_booker")
+logger = logging.getLogger("whatsapp_agent")
 
 # Tool name -> speakable step for the live-commentary engine.
 _STEP_NAMES = {

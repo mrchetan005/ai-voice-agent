@@ -4,7 +4,7 @@ Sync on purpose: LangChain tools are plain sync callables (LangGraph runs
 them in a worker thread); async callers wrap calls in asyncio.to_thread.
 
 Self-check (live, read-only):
-    uv run --env-file .env python -m appointment_booker.cal_client
+    uv run --env-file .env python -m whatsapp_agent.capabilities.booking.cal_client
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ V_EVENT_TYPES = "2024-06-14"
 
 class CalClient:
     def __init__(self, api_key: str | None = None, timeout: float = 20.0) -> None:
-        from appointment_booker.config import get_settings
+        from whatsapp_agent.config import get_settings
 
         self._key = api_key or get_settings().cal_api_key
         if not self._key:
@@ -154,7 +154,7 @@ def _self_check() -> int:
             f"({et.get('lengthInMinutes') or et.get('length')} min)"
         )
 
-    from appointment_booker.config import get_settings
+    from whatsapp_agent.config import get_settings
 
     settings = get_settings()
     et_id = settings.cal_event_type_id or int(event_types[0]["id"])

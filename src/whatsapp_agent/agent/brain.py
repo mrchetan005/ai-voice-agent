@@ -13,7 +13,7 @@ Design:
   cross-channel memory.
 
 Offline sanity check (needs DATABASE_URL + GOOGLE_API_KEY + CAL keys):
-    uv run --env-file .env python -m appointment_booker.graph "hi, I'd like a meeting tomorrow"
+    uv run --env-file .env python -m whatsapp_agent.agent.brain "hi, I'd like a meeting tomorrow"
 """
 
 from __future__ import annotations
@@ -37,19 +37,19 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.prebuilt import create_react_agent
 
-from appointment_booker.booking_service import BookingService
-from appointment_booker.cal_client import CalClient
-from appointment_booker.prompts import (
+from whatsapp_agent.agent.prompts import (
     AVAILABILITY_GUIDE,
     CHAT_EMAIL_NOTE,
     CHAT_RULES,
     VOICE_DELIVERY_NOTE,
     VOICE_RULES,
 )
-from appointment_booker.webhooks import WebhookHub
-from appointment_booker.whatsapp_api import WhatsAppClient
+from whatsapp_agent.capabilities.booking.cal_client import CalClient
+from whatsapp_agent.capabilities.booking.service import BookingService
+from whatsapp_agent.channels.client import WhatsAppClient
+from whatsapp_agent.channels.events import WebhookHub
 
-logger = logging.getLogger("appointment_booker")
+logger = logging.getLogger("whatsapp_agent")
 
 # Brain LLM gateways (all OpenAI-compatible except gemini). BYOK gateways
 # (OpenRouter key vault, a self-hosted LiteLLM proxy) hold the provider
@@ -76,7 +76,7 @@ def make_brain_llm(
         SCHEDULER_MODEL=openrouter/anthropic/claude-sonnet-5
         SCHEDULER_MODEL=custom/my-litellm-alias
     """
-    from appointment_booker.config import get_settings
+    from whatsapp_agent.config import get_settings
 
     settings = get_settings()
     spec = model_spec or settings.scheduler_model
@@ -114,7 +114,6 @@ class BookingAgent:
         cal: CalClient,
         event_type_id: int,
         wa: WhatsAppClient,
-        hub: WebhookHub,
         recipient: str,
         service: BookingService,
         timezone: str = "Asia/Kolkata",
@@ -132,7 +131,7 @@ class BookingAgent:
         self._event_type_id = event_type_id
         self._tz = ZoneInfo(timezone)
         self._tz_name = timezone
-        from appointment_booker.config import get_settings
+        from whatsapp_agent.config import get_settings
 
         self._db_url = db_url or get_settings().database_url
         self._agent: Any = None
@@ -505,8 +504,8 @@ class BookingAgent:
 
 
 async def _self_check(utterance: str) -> int:
-    from appointment_booker.booking_service import create_booking_service
-    from appointment_booker.config import get_settings
+    from whatsapp_agent.capabilities.booking.service import create_booking_service
+    from whatsapp_agent.config import get_settings
 
     logging.basicConfig(level=logging.INFO)
     settings = get_settings()
@@ -520,7 +519,7 @@ async def _self_check(utterance: str) -> int:
         cal, wa, hub, recipient, event_type_id, timezone, "self-check"
     )
     agent = BookingAgent(
-        cal, event_type_id, wa, hub, recipient, service, timezone=timezone,
+        cal, event_type_id, wa, recipient, service, timezone=timezone,
     )
     await agent.start()
     try:

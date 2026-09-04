@@ -13,8 +13,8 @@ import asyncio
 import datetime as dt
 import sys
 
-from appointment_booker.booking_service import BookingService
-from appointment_booker.webhooks import ButtonReply, WebhookHub
+from whatsapp_agent.capabilities.booking.service import BookingService
+from whatsapp_agent.channels.events import ButtonReply, WebhookHub
 
 
 class FakeCal:

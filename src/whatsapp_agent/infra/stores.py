@@ -7,11 +7,12 @@ the DB is down — persistence must never block or break a live call.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 from typing import Any
 
-logger = logging.getLogger("appointment_booker")
+logger = logging.getLogger("whatsapp_agent")
 
 
 class _PgStore:
@@ -261,3 +262,82 @@ class SessionStore(_PgStore):
             "WHERE session_id = %s",
             (Jsonb(verdict), session_id),
         )
+
+
+class TranscriptStore:
+    """Async, non-blocking transcript persistence for single-brain mode.
+
+    Same ``voiceagent_turns`` table the dual-brain agent uses, so both modes
+    share one conversation history per caller. Writes are fire-and-forget:
+    the call never waits on Neon.
+    """
+
+    def __init__(self, thread_id: str, db_url: str) -> None:
+        self._thread_id = thread_id
+        self._db_url = db_url
+        self._db: Any = None
+        # THIS session's turns only (DB rows span all past sessions and may
+        # land after hangup — fire-and-forget). Feeds the post-call recap.
+        self.session_turns: list[tuple[str, str]] = []
+
+    async def connect(self) -> None:
+        import psycopg
+
+        try:
+            self._db = await psycopg.AsyncConnection.connect(
+                self._db_url, autocommit=True, connect_timeout=10
+            )
+            await self._db.execute(
+                "CREATE TABLE IF NOT EXISTS voiceagent_turns ("
+                "id bigserial PRIMARY KEY, thread_id text NOT NULL, "
+                "role text NOT NULL, content text NOT NULL, "
+                "created_at timestamptz NOT NULL DEFAULT now())"
+            )
+        except Exception as exc:
+            logger.warning("transcript store unavailable (memory-only call): %s", exc)
+            self._db = None
+
+    async def save(self, role: str, text: str) -> None:
+        """Signature matches GeminiLiveProxy's on_transcription callback."""
+        self.session_turns.append((role, text))
+        if self._db is None:
+            return
+        asyncio.get_running_loop().create_task(self._insert(role, text))
+
+    async def load_recent(self, limit: int = 30) -> list[tuple[str, str]]:
+        """(role, content) rows, oldest first — cross-channel history for
+        seeding a new voice session's context."""
+        if self._db is None:
+            return []
+        try:
+            cursor = await self._db.execute(
+                "SELECT role, content FROM voiceagent_turns "
+                "WHERE thread_id = %s ORDER BY id DESC LIMIT %s",
+                (self._thread_id, limit),
+            )
+            return list(reversed(await cursor.fetchall()))
+        except Exception as exc:
+            logger.warning("history load failed: %s", exc)
+            return []
+
+    async def _insert(self, role: str, text: str) -> None:
+        # Neon suspends idle connections mid-call; reconnect once and retry.
+        for attempt in (1, 2):
+            try:
+                await self._db.execute(
+                    "INSERT INTO voiceagent_turns (thread_id, role, content) VALUES (%s, %s, %s)",
+                    (self._thread_id, role, text),
+                )
+                return
+            except Exception as exc:
+                if attempt == 2:
+                    logger.warning("transcript insert failed (dropped): %s", exc)
+                    return
+                logger.info("transcript conn stale, reconnecting: %s", exc)
+                await self.connect()
+                if self._db is None:
+                    return
+
+    async def close(self) -> None:
+        if self._db is not None:
+            await self._db.close()

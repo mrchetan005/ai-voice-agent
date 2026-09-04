@@ -12,7 +12,7 @@ import datetime as dt
 import os
 import sys
 
-from appointment_booker.stores import SessionStore
+from whatsapp_agent.infra.stores import SessionStore
 
 SID = "test-session-0001"
 

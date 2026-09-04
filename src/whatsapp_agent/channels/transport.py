@@ -27,12 +27,12 @@ import av
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.mediastreams import MediaStreamTrack
 
-from appointment_booker.webhooks import WebhookHub
-from appointment_booker.whatsapp_api import WhatsAppClient
 from voiceagent.base import END_OF_STREAM, EndOfStream, put_drop_oldest
 from voiceagent.models import AudioFrame
+from whatsapp_agent.channels.client import WhatsAppClient
+from whatsapp_agent.channels.events import WebhookHub
 
-logger = logging.getLogger("appointment_booker")
+logger = logging.getLogger("whatsapp_agent")
 
 _OUT_RATE_WIRE = 48_000  # Opus native
 _FRAME_MS = 20

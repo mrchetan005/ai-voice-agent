@@ -34,37 +34,6 @@ import re
 import sys
 import uuid
 
-from appointment_booker.booking_handler import BookingCall
-from appointment_booker.booking_service import (
-    BookingService,
-    create_booking_service,
-)
-from appointment_booker.cal_client import CalClient
-from appointment_booker.config import get_settings, logging_setup
-from appointment_booker.graph import BookingAgent
-from appointment_booker.metering import (
-    ChatSessionTracker,
-    UsageMeter,
-    write_session_record,
-)
-from appointment_booker.native_tools import (
-    TextBridge,
-    TranscriptStore,
-    build_native_tools,
-)
-from appointment_booker.prompts import (
-    CALL_CONNECTED_NUDGE,
-    CHAT_DURING_CALL_NUDGE,
-    DUAL_BRAIN_VOICE_PROMPT,
-    INBOUND_PICKUP_NUDGE,
-    build_single_brain_prompt,
-    render_profile_block,
-)
-from appointment_booker.recap import RecapSender
-from appointment_booker.stores import SessionStore
-from appointment_booker.transport_whatsapp import WhatsAppCallTransport
-from appointment_booker.webhooks import WebhookHub
-from appointment_booker.whatsapp_api import WhatsAppClient
 from voiceagent import OrchestratorBridge, SessionConfig
 from voiceagent.guardrails_and_eval import GuardrailPipeline, TelemetryRecorder
 from voiceagent.providers import (
@@ -72,8 +41,38 @@ from voiceagent.providers import (
     OpenAIRealtimeProxy,
     SplitStackProxy,
 )
+from whatsapp_agent.agent.brain import BookingAgent
+from whatsapp_agent.agent.call_handler import BookingCall
+from whatsapp_agent.agent.prompts import (
+    CALL_CONNECTED_NUDGE,
+    CHAT_DURING_CALL_NUDGE,
+    DUAL_BRAIN_VOICE_PROMPT,
+    INBOUND_PICKUP_NUDGE,
+    build_single_brain_prompt,
+    render_profile_block,
+)
+from whatsapp_agent.agent.recap import RecapSender
+from whatsapp_agent.capabilities.booking.cal_client import CalClient
+from whatsapp_agent.capabilities.booking.service import (
+    BookingService,
+    create_booking_service,
+)
+from whatsapp_agent.capabilities.booking.voice_tools import (
+    TextBridge,
+    build_native_tools,
+)
+from whatsapp_agent.channels.client import WhatsAppClient
+from whatsapp_agent.channels.events import WebhookHub
+from whatsapp_agent.channels.transport import WhatsAppCallTransport
+from whatsapp_agent.config import get_settings, logging_setup
+from whatsapp_agent.infra.metering import (
+    ChatSessionTracker,
+    UsageMeter,
+    write_session_record,
+)
+from whatsapp_agent.infra.stores import SessionStore, TranscriptStore
 
-logger = logging.getLogger("appointment_booker")
+logger = logging.getLogger("whatsapp_agent")
 
 # -- provider management -----------------------------------------------------
 # gemini-live: the live model is voice+brain (single) or voice-only (dual).
@@ -465,7 +464,7 @@ async def run_chat(args: argparse.Namespace) -> int:
                 )
                 services[sender] = service
                 agent = BookingAgent(
-                    cal, event_type_id, wa, hub, sender, service,
+                    cal, event_type_id, wa, sender, service,
                     timezone=timezone, business_name=business, channel="chat",
                     profile_note=render_profile_block(service.profile),
                 )
@@ -575,7 +574,7 @@ async def run(args: argparse.Namespace) -> int:
                 "whatsapp-voice-agent",
             )
             booking_agent = BookingAgent(
-                cal, event_type_id, wa, hub, recipient, service,
+                cal, event_type_id, wa, recipient, service,
                 timezone=timezone, business_name=business,
                 profile_note=render_profile_block(service.profile),
             )
