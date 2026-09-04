@@ -107,3 +107,8 @@ async def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(asyncio.run(main()))
+
+
+# -- pytest adapter -----------------------------------------------------------
+def test_suite() -> None:
+    assert asyncio.run(main()) == 0

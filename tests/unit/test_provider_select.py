@@ -171,3 +171,8 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# -- pytest adapter -----------------------------------------------------------
+def test_suite() -> None:
+    assert main() == 0

@@ -84,3 +84,17 @@ if __name__ == "__main__":
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     sys.exit(asyncio.run(main()))
+
+
+# -- pytest adapter -----------------------------------------------------------
+
+import pytest  # noqa: E402
+
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skipif(not os.environ.get("DATABASE_URL"), reason="needs DATABASE_URL"),
+]
+
+
+def test_suite() -> None:
+    assert asyncio.run(main()) == 0

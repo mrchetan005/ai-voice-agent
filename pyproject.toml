@@ -30,6 +30,15 @@ booking = [
 [project.scripts]
 whatsapp-agent = "whatsapp_agent.cli:cli"
 
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "fakeredis>=2.23"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-m 'not live'"
+markers = ["live: hits real APIs/DB; needs .env (uv run --env-file .env pytest -m live)"]
+
 [tool.ruff]
 target-version = "py311"
 

@@ -34,7 +34,7 @@ from voiceagent.guardrails_and_eval import TelemetryRecorder, _wait_until
 from voiceagent.models import AudioFrame, SessionConfig
 from voiceagent.providers import SplitStackProxy, make_llm_agent
 
-FIXTURE = Path(__file__).parent / "fixtures" / "utterance_16k.wav"
+FIXTURE = Path(__file__).parent.parent / "fixtures" / "utterance_16k.wav"
 
 VOICES = {
     "rohan": "4877b818-c7fe-4c89-b1cf-eadf8e23da72",   # male
@@ -240,3 +240,19 @@ async def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(asyncio.run(main()))
+
+
+# -- pytest adapter -----------------------------------------------------------
+import os  # noqa: E402
+
+import pytest  # noqa: E402
+
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skipif(not os.environ.get("DEEPGRAM_API_KEY") or not os.environ.get("GROQ_API_KEY") or not os.environ.get("CARTESIA_API_KEY"), reason="needs DEEPGRAM_API_KEY+GROQ_API_KEY+CARTESIA_API_KEY"),
+]
+
+
+def test_suite(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["test_split_stack", "--voice", "both"])
+    assert asyncio.run(main()) == 0

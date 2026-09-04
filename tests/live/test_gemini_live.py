@@ -128,3 +128,18 @@ async def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(asyncio.run(main()))
+
+
+# -- pytest adapter -----------------------------------------------------------
+import os  # noqa: E402
+
+import pytest  # noqa: E402
+
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skipif(not os.environ.get("GOOGLE_API_KEY"), reason="needs GOOGLE_API_KEY"),
+]
+
+
+def test_suite() -> None:
+    assert asyncio.run(main()) == 0
