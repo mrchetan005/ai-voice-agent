@@ -16,7 +16,7 @@ from voiceagent.providers import (
     OpenAIRealtimeProxy,
     SplitStackProxy,
 )
-from whatsapp_agent.cli import (
+from whatsapp_agent.channels.call_manager import (
     _PROVIDER_RATES,
     _build_proxy,
     _resolve_brain,

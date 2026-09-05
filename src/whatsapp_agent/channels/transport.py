@@ -30,7 +30,7 @@ from aiortc.mediastreams import MediaStreamTrack
 from voiceagent.base import END_OF_STREAM, EndOfStream, put_drop_oldest
 from voiceagent.models import AudioFrame
 from whatsapp_agent.channels.client import WhatsAppClient
-from whatsapp_agent.channels.events import WebhookHub
+from whatsapp_agent.channels.events import CallSession
 
 logger = logging.getLogger("whatsapp_agent")
 
@@ -124,13 +124,13 @@ class WhatsAppCallTransport:
     def __init__(
         self,
         wa: WhatsAppClient,
-        hub: WebhookHub,
+        session: CallSession,
         to: str,
         input_sample_rate: int = 16_000,
         output_sample_rate: int = 24_000,
     ) -> None:
         self._wa = wa
-        self._hub = hub
+        self._session = session
         self._to = to
         self._input_rate = input_sample_rate
         self._pc = RTCPeerConnection()
@@ -165,7 +165,7 @@ class WhatsAppCallTransport:
             or response.get("call_id")
         )
 
-        answer = await self._hub.wait_call_answer(answer_timeout_s)
+        answer = await self._session.wait_call_answer(answer_timeout_s)
         self.call_id = answer.call_id or self.call_id
         await self._pc.setRemoteDescription(
             RTCSessionDescription(sdp=answer.sdp, type="answer")
@@ -213,7 +213,7 @@ class WhatsAppCallTransport:
         return resampled if isinstance(resampled, list) else [resampled]
 
     async def _watch_hangup(self) -> None:
-        await self._hub.call_ended.wait()
+        await self._session.ended.wait()
         logger.info("remote hangup signalled")
         put_drop_oldest(self._in_queue, END_OF_STREAM)
 

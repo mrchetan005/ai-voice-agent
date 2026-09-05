@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 
 from whatsapp_agent.capabilities.booking.cal_client import CalClient
 from whatsapp_agent.channels.client import WhatsAppClient
-from whatsapp_agent.channels.events import WebhookHub
+from whatsapp_agent.channels.events import InboundWaiter, NullWaiter
 from whatsapp_agent.infra.stores import BookingStore, ProfileStore
 
 logger = logging.getLogger("whatsapp_agent")
@@ -73,7 +73,7 @@ class BookingService:
         self,
         cal: CalClient,
         wa: WhatsAppClient,
-        hub: WebhookHub,
+        waiter: InboundWaiter | None,
         booking_store: BookingStore,
         profile_store: ProfileStore,
         recipient: str,
@@ -83,7 +83,7 @@ class BookingService:
     ) -> None:
         self.cal = cal
         self.wa = wa
-        self.hub = hub
+        self.waiter = waiter or NullWaiter()
         self.booking_store = booking_store
         self.profile_store = profile_store
         self.recipient = recipient
@@ -128,7 +128,7 @@ class BookingService:
         stop_at = time.monotonic() + wait_s
         while (remaining := stop_at - time.monotonic()) > 0:
             try:
-                msg = await self.hub.wait_text(timeout_s=remaining)
+                msg = await self.waiter.wait_text(timeout_s=remaining)
             except TimeoutError:
                 return None
             if match := EMAIL_RE.search(msg.text):
@@ -176,7 +176,7 @@ class BookingService:
         deadline = time.monotonic() + timeout_s
         while (remaining := deadline - time.monotonic()) > 0:
             try:
-                reply = await self.hub.wait_button(timeout_s=remaining)
+                reply = await self.waiter.wait_button(timeout_s=remaining)
             except TimeoutError:
                 break
             if reply.button_id == f"email_ok:{self._pending_email}":
@@ -314,7 +314,7 @@ class BookingService:
 async def create_booking_service(
     cal: CalClient,
     wa: WhatsAppClient,
-    hub: WebhookHub,
+    waiter: InboundWaiter | None,
     recipient: str,
     event_type_id: int,
     timezone: str,
@@ -331,7 +331,7 @@ async def create_booking_service(
     await profile_store.connect()
     await booking_store.connect()
     service = BookingService(
-        cal, wa, hub, booking_store, profile_store,
+        cal, wa, waiter, booking_store, profile_store,
         recipient, event_type_id, timezone, source,
     )
     service.profile = await profile_store.load(recipient)

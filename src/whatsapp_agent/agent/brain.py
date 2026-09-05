@@ -47,7 +47,6 @@ from whatsapp_agent.agent.prompts import (
 from whatsapp_agent.capabilities.booking.cal_client import CalClient
 from whatsapp_agent.capabilities.booking.service import BookingService
 from whatsapp_agent.channels.client import WhatsAppClient
-from whatsapp_agent.channels.events import WebhookHub
 
 logger = logging.getLogger("whatsapp_agent")
 
@@ -511,12 +510,11 @@ async def _self_check(utterance: str) -> int:
     settings = get_settings()
     cal = CalClient()
     wa = WhatsAppClient()
-    hub = WebhookHub()  # not started: email tool unused in this check
     recipient = settings.whatsapp_recipient
     event_type_id = settings.cal_event_type_id
     timezone = settings.cal_timezone
     service = await create_booking_service(
-        cal, wa, hub, recipient, event_type_id, timezone, "self-check"
+        cal, wa, None, recipient, event_type_id, timezone, "self-check"
     )
     agent = BookingAgent(
         cal, event_type_id, wa, recipient, service, timezone=timezone,

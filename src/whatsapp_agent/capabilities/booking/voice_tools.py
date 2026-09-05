@@ -15,11 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from whatsapp_agent.capabilities.booking.service import (
-    EMAIL_RE as _EMAIL_RE,
-)
 from whatsapp_agent.capabilities.booking.service import BookingService
-from whatsapp_agent.channels.events import WebhookHub
 
 logger = logging.getLogger("whatsapp_agent")
 
@@ -56,64 +52,6 @@ class BookingRefArgs(BaseModel):
 class RescheduleArgs(BaseModel):
     booking_uid: str
     new_start_local_iso: dt.datetime
-
-
-class TextBridge:
-    """Chat<->call sync during a live call.
-
-    SINGLE consumer of inbound WhatsApp texts while a call is active:
-    every message is (a) injected into the live Gemini session so the voice
-    agent reads and reacts to it, (b) checked for an email address to
-    satisfy request_email_over_whatsapp, and (c) persisted to the shared
-    transcript thread. Without this, the email tool and any chat handler
-    race each other on the same queue.
-    """
-
-    def __init__(self, hub: WebhookHub, store: Any = None) -> None:
-        self._hub = hub
-        self._store = store
-        self._inject: Any = None  # async fn(text) -> None, set via attach()
-        self._task: asyncio.Task | None = None
-        self._email: str | None = None
-        self._email_event = asyncio.Event()
-
-    def attach(self, inject_cb: Any) -> None:
-        self._inject = inject_cb
-
-    def start(self) -> None:
-        self._task = asyncio.get_running_loop().create_task(self._loop())
-
-    async def _loop(self) -> None:
-        while True:
-            try:
-                msg = await self._hub.wait_text(timeout_s=3600)
-            except TimeoutError:
-                continue
-            text = msg.text.strip()
-            if not text:
-                continue
-            if match := _EMAIL_RE.search(text):
-                self._email = match.group()
-                self._email_event.set()
-            if self._store is not None:
-                await self._store.save("user", f"[via chat] {text}")
-            if self._inject is not None:
-                try:
-                    await self._inject(text)
-                except Exception:
-                    logger.exception("mid-call text injection failed")
-
-    async def wait_email(self, timeout_s: float) -> str | None:
-        try:
-            await asyncio.wait_for(self._email_event.wait(), timeout_s)
-        except TimeoutError:
-            return None
-        self._email_event.clear()
-        return self._email
-
-    def stop(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
 
 
 def build_native_tools(

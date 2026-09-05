@@ -7,6 +7,7 @@ so a failure can only cost us the record, never the call.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 import uuid
@@ -133,6 +134,36 @@ async def write_session_record(
         })
     except Exception:
         logger.exception("session record write failed (record lost, call unaffected)")
+
+
+async def record_session(
+    store: SessionStore,
+    meter: UsageMeter,
+    *,
+    turns: list[tuple[str, str]],
+    service: Any,
+    telemetry: Any,
+    started_at: dt.datetime,
+    language: str = "",
+) -> None:
+    """Time-capped, exception-proof session-record write for teardown paths."""
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(
+            write_session_record(
+                store, meter,
+                turns=turns,
+                actions=list(service.session_actions) if service else [],
+                errors=list(service.session_errors) if service else [],
+                telemetry=telemetry,
+                started_at=started_at,
+                db_degraded=store.degraded
+                or (service.booking_store.degraded if service else False),
+                language=language,
+            ),
+            timeout=15.0,
+        )
 
 
 class ChatSessionTracker:

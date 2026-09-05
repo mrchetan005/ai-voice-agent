@@ -14,7 +14,7 @@ import datetime as dt
 import sys
 
 from whatsapp_agent.capabilities.booking.service import BookingService
-from whatsapp_agent.channels.events import ButtonReply, WebhookHub
+from whatsapp_agent.channels.events import ButtonReply, CallSession
 
 
 class FakeCal:
@@ -94,10 +94,11 @@ async def main() -> int:
         if not ok:
             failures.append(name)
 
-    cal, wa, hub = FakeCal(), FakeWA(), WebhookHub(verify_token="x")
+    cal, wa = FakeCal(), FakeWA()
+    waiter = CallSession(peer="919999999999", direction="outbound")
     bookings, profiles = FakeBookingStore(), FakeProfileStore()
     service = BookingService(
-        cal, wa, hub, bookings, profiles,
+        cal, wa, waiter, bookings, profiles,
         recipient="919999999999", event_type_id=1,
         timezone="Asia/Kolkata", source="test",
     )
@@ -123,9 +124,9 @@ async def main() -> int:
           result["status"] == "CONFIRMATION_SENT"
           and wa.buttons and wa.buttons[-1][2][0][0] == "email_ok:c@x.com")
 
-    hub.button_replies.put_nowait(ButtonReply(
+    waiter.buttons.put_nowait(ButtonReply(
         from_number="919999999999", button_id="email_ok:stale@old.com", title="Confirm"))
-    hub.button_replies.put_nowait(ButtonReply(
+    waiter.buttons.put_nowait(ButtonReply(
         from_number="919999999999", button_id="email_ok:c@x.com", title="Confirm"))
     result = await service.wait_email_confirmation(timeout_s=1.0)
     check("stale tap skipped, matching tap -> CONFIRMED",
@@ -136,7 +137,7 @@ async def main() -> int:
 
     # -- edit path -----------------------------------------------------------
     await service.send_email_confirmation("d@y.com")
-    hub.button_replies.put_nowait(ButtonReply(
+    waiter.buttons.put_nowait(ButtonReply(
         from_number="919999999999", button_id="email_edit", title="Edit"))
     result = await service.wait_email_confirmation(timeout_s=1.0)
     check("edit tap -> EDIT_REQUESTED + retype text sent",
