@@ -38,10 +38,12 @@ def create_app(
     async def lifespan(app: FastAPI):
         # Heavy lifting is imported here so the module stays importable
         # (and testable) without any environment.
+        from whatsapp_agent.api.routes.webhooks import make_webhook_gate
         from whatsapp_agent.capabilities.booking.cal_client import CalClient
         from whatsapp_agent.channels.call_manager import CallManager
         from whatsapp_agent.channels.chat_manager import ChatManager
         from whatsapp_agent.channels.client import WhatsAppClient
+        from whatsapp_agent.infra.redis import RedisGateway
         from whatsapp_agent.infra.stores import SessionStore
 
         if not settings.whatsapp_app_secret:
@@ -49,12 +51,20 @@ def create_app(
                 "WHATSAPP_APP_SECRET unset — webhook signature validation is "
                 "OFF (dev only; set it in production)"
             )
+        redis = RedisGateway(settings.redis_url)
+        app.state.redis = redis
+        if redis.enabled:
+            app.state.webhook_gate = make_webhook_gate(
+                redis, settings.webhook_rate_per_min
+            )
+        else:
+            logger.warning("REDIS_URL unset — dedup/rate-limit/caches disabled")
         wa = WhatsAppClient()
         cal = CalClient()
         session_store = SessionStore(settings.database_url)
         await session_store.connect()
-        calls = CallManager(app.state.router, wa, cal, session_store)
-        chat = ChatManager(app.state.router, wa, cal, session_store)
+        calls = CallManager(app.state.router, wa, cal, session_store, redis=redis)
+        chat = ChatManager(app.state.router, wa, cal, session_store, redis=redis)
         app.state.wa = wa
         app.state.cal = cal
         app.state.session_store = session_store
@@ -78,6 +88,7 @@ def create_app(
             await session_store.close()
             cal.close()
             await wa.aclose()
+            await redis.aclose()
             logger.info("whatsapp-agent shut down cleanly")
 
     # Docs are disabled: this app shares its ingress with the public Meta

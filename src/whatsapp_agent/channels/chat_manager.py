@@ -24,6 +24,7 @@ from whatsapp_agent.channels.client import WhatsAppClient
 from whatsapp_agent.channels.events import EventRouter
 from whatsapp_agent.config import get_settings
 from whatsapp_agent.infra.metering import ChatSessionTracker, record_session
+from whatsapp_agent.infra.redis import RedisGateway
 from whatsapp_agent.infra.stores import SessionStore
 
 logger = logging.getLogger("whatsapp_agent")
@@ -38,11 +39,13 @@ class ChatManager:
         wa: WhatsAppClient,
         cal: CalClient,
         session_store: SessionStore,
+        redis: RedisGateway | None = None,
     ) -> None:
         self.router = router
         self.wa = wa
         self.cal = cal
         self.session_store = session_store
+        self.redis = redis or RedisGateway(None)
         # One BookingAgent (+ its own DB conn) per sender; fine for the
         # 5-recipient test allowlist — pool connections before multi-tenant.
         self.agents: dict[str, BookingAgent] = {}
@@ -111,12 +114,14 @@ class ChatManager:
         service = await create_booking_service(
             self.cal, self.wa, None, sender,
             settings.cal_event_type_id, settings.cal_timezone, "whatsapp-chat",
+            redis=self.redis,
         )
         self.services[sender] = service
         agent = BookingAgent(
             self.cal, settings.cal_event_type_id, self.wa, sender, service,
             timezone=settings.cal_timezone, business_name=settings.business_name,
             channel="chat", profile_note=render_profile_block(service.profile),
+            redis=self.redis,
         )
         await agent.start()
         self.agents[sender] = agent

@@ -65,7 +65,10 @@ class _PgStore:
 
 class ProfileStore(_PgStore):
     """phone -> name/email/timezone. Lets repeat callers confirm instead of
-    re-dictating their details on every call."""
+    re-dictating their details on every call. Optional Redis cache-aside
+    (300 s, invalidated on upsert) skips the Neon round trip at call setup."""
+
+    _CACHE_TTL_S = 300
 
     _TABLE_SQL = (
         "CREATE TABLE IF NOT EXISTS voiceagent_profiles ("
@@ -76,7 +79,15 @@ class ProfileStore(_PgStore):
         "updated_at timestamptz NOT NULL DEFAULT now())",
     )
 
+    def __init__(self, db_url: str, redis: Any = None) -> None:
+        super().__init__(db_url)
+        self._redis = redis  # RedisGateway or None
+
     async def load(self, phone: str) -> dict[str, str] | None:
+        if self._redis is not None:
+            cached = await self._redis.get_json(f"profile:{phone}")
+            if cached is not None:
+                return cached
         cursor = await self._execute(
             "SELECT name, email, timezone FROM voiceagent_profiles WHERE phone = %s",
             (phone,),
@@ -86,7 +97,10 @@ class ProfileStore(_PgStore):
         row = await cursor.fetchone()
         if row is None:
             return None
-        return {"name": row[0], "email": row[1], "timezone": row[2]}
+        profile = {"name": row[0], "email": row[1], "timezone": row[2]}
+        if self._redis is not None:
+            await self._redis.set_json(f"profile:{phone}", profile, ttl_s=self._CACHE_TTL_S)
+        return profile
 
     async def upsert(
         self,
@@ -106,6 +120,8 @@ class ProfileStore(_PgStore):
             "updated_at = now()",
             (phone, name or "", email or "", timezone or ""),
         )
+        if self._redis is not None:
+            await self._redis.delete(f"profile:{phone}")
 
 
 class BookingStore(_PgStore):

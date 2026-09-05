@@ -9,8 +9,10 @@ Self-check (live, read-only):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
+import time
 from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -136,6 +138,41 @@ class CalClient:
 
     def close(self) -> None:
         self._http.close()
+
+
+_SLOTS_TTL_S = 90.0
+_slots_memo: dict[str, tuple[float, dict]] = {}
+
+
+async def get_slots_cached(
+    cal: CalClient,
+    event_type_id: int,
+    start: date,
+    end: date,
+    timezone: str,
+    redis: Any = None,
+) -> dict[str, list[dict[str, str]]]:
+    """Cache-aside for get_slots: in-process memo -> Redis (90 s) -> Cal API.
+    Replaces the old per-agent background refresh loops; the cost is one
+    0.3-0.8 s Cal round trip per 90 s across ALL sessions instead of a
+    polling task per agent. `redis` is a RedisGateway or None (skip layer)."""
+    key = f"cal:slots:{event_type_id}:{start.isoformat()}:{end.isoformat()}:{timezone}"
+    now = time.monotonic()
+    hit = _slots_memo.get(key)
+    if hit is not None and now - hit[0] < _SLOTS_TTL_S:
+        return hit[1]
+    if redis is not None and (cached := await redis.get_json(key)) is not None:
+        _slots_memo[key] = (now, cached)
+        return cached
+    slots = await asyncio.to_thread(
+        cal.get_slots, event_type_id, start, end, timezone
+    )
+    for stale in [k for k, (ts, _) in _slots_memo.items() if now - ts >= _SLOTS_TTL_S]:
+        del _slots_memo[stale]
+    _slots_memo[key] = (now, slots)
+    if redis is not None:
+        await redis.set_json(key, slots, ttl_s=int(_SLOTS_TTL_S))
+    return slots
 
 
 def _self_check() -> int:

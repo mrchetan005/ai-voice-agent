@@ -37,7 +37,7 @@ from whatsapp_agent.agent.prompts import (
     render_profile_block,
 )
 from whatsapp_agent.agent.recap import RecapSender
-from whatsapp_agent.capabilities.booking.cal_client import CalClient
+from whatsapp_agent.capabilities.booking.cal_client import CalClient, get_slots_cached
 from whatsapp_agent.capabilities.booking.service import (
     BookingService,
     create_booking_service,
@@ -53,6 +53,7 @@ from whatsapp_agent.channels.events import (
 from whatsapp_agent.channels.transport import WhatsAppCallTransport
 from whatsapp_agent.config import get_settings
 from whatsapp_agent.infra.metering import UsageMeter, record_session
+from whatsapp_agent.infra.redis import RedisGateway
 from whatsapp_agent.infra.stores import SessionStore, TranscriptStore
 
 logger = logging.getLogger("whatsapp_agent")
@@ -143,6 +144,7 @@ async def _single_brain_setup(
     timezone: str,
     business: str,
     inbound: bool,
+    redis: RedisGateway | None = None,
 ) -> tuple[str, dict, TranscriptStore, TextBridge, BookingService]:
     """SINGLE-BRAIN session pieces: Gemini Live is the whole agent — persona
     + availability snapshot in its system instruction, Cal.com/WhatsApp tools
@@ -152,10 +154,10 @@ async def _single_brain_setup(
     from zoneinfo import ZoneInfo
 
     today = datetime.now(ZoneInfo(timezone)).date()  # business-local, not server-local
-    slots = await asyncio.to_thread(
-        cal.get_slots, event_type_id,
+    slots = await get_slots_cached(
+        cal, event_type_id,
         today + timedelta(days=1), today + timedelta(days=7),
-        timezone,
+        timezone, redis=redis,
     )
     # Weekday names inline: the model mislabeled dates ("Saturday, August
     # twenty eighth" for a Friday) when given bare ISO dates.
@@ -170,7 +172,8 @@ async def _single_brain_setup(
     await transcript_store.connect()
 
     service = await create_booking_service(
-        cal, wa, session, caller, event_type_id, timezone, "voice-single-brain"
+        cal, wa, session, caller, event_type_id, timezone, "voice-single-brain",
+        redis=redis,
     )
 
     # Cross-channel context: previous calls AND chats with this number.
@@ -247,11 +250,14 @@ class CallManager:
         wa: WhatsAppClient,
         cal: CalClient,
         session_store: SessionStore,
+        redis: RedisGateway | None = None,
     ) -> None:
         self.router = router
         self.wa = wa
         self.cal = cal
         self.session_store = session_store
+        # Disabled gateway when Redis is off — every op fail-open, no None checks.
+        self.redis = redis or RedisGateway(None)
         # v1 policy: one active call at a time (see module docstring).
         self._call_lock = asyncio.Lock()
         self._inbound_task: asyncio.Task | None = None
@@ -319,6 +325,14 @@ class CallManager:
         if self._call_lock.locked():
             raise CallBusy(peer)
         async with self._call_lock:
+            # Cross-restart guard: a lingering call:active lock (e.g. API
+            # retry racing a live call) refuses the dial; TTL is the backstop
+            # if a crash ever skips release. Inbound pickups skip this — we
+            # never refuse a user who is calling us.
+            lock_key = f"call:active:{peer}"
+            lock_token = call_ref or uuid.uuid4().hex
+            if not await self.redis.acquire_lock(lock_key, lock_token, ttl_s=7200):
+                raise CallBusy(peer)
             session = self.router.open_call(peer, "outbound")
             session.call_ref = call_ref
             try:
@@ -347,6 +361,7 @@ class CallManager:
                 return await self._run_call(spec, session)
             finally:
                 self.router.close_call(session)
+                await self.redis.release_lock(lock_key, lock_token)
 
     # -- the one runner ------------------------------------------------------------
 
@@ -373,18 +388,20 @@ class CallManager:
                  text_bridge, service) = await _single_brain_setup(
                     self.cal, self.wa, session, spec.peer, event_type_id,
                     timezone, business, inbound=(spec.direction == "inbound"),
+                    redis=self.redis,
                 )
             else:
                 # DUAL-BRAIN: the voice engine relays; LangGraph is the brain.
                 system_prompt = DUAL_BRAIN_VOICE_PROMPT
                 service = await create_booking_service(
                     self.cal, self.wa, session, spec.peer, event_type_id,
-                    timezone, "whatsapp-voice-agent",
+                    timezone, "whatsapp-voice-agent", redis=self.redis,
                 )
                 booking_agent = BookingAgent(
                     self.cal, event_type_id, self.wa, spec.peer, service,
                     timezone=timezone, business_name=business,
                     profile_note=render_profile_block(service.profile),
+                    redis=self.redis,
                 )
                 booking_agent.meter = meter
                 await booking_agent.start()

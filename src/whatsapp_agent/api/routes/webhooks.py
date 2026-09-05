@@ -17,10 +17,53 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from whatsapp_agent.config import get_settings
+from whatsapp_agent.infra.redis import RedisGateway
 
 logger = logging.getLogger("whatsapp_agent")
 
 router = APIRouter()
+
+
+def make_webhook_gate(redis: RedisGateway, rate_per_min: int):
+    """Per-item dedup + per-phone rate limit, applied BEFORE dispatch.
+    Drops offending items in place and always lets the request 200 —
+    a non-200 makes Meta retry the whole batch. Fail-open via the gateway."""
+
+    async def gate(payload: dict) -> dict | None:
+        for entry in payload.get("entry", []) or []:
+            for change in entry.get("changes", []) or []:
+                value = change.get("value") or {}
+                for kind in ("messages", "calls"):
+                    items = value.get(kind)
+                    if not items:
+                        continue
+                    kept = []
+                    for item in items:
+                        item_id = str(item.get("id") or "")
+                        # Call events (connect/terminate/...) SHARE one call
+                        # id — the event name must be part of the dedup key
+                        # or the terminate would be dropped as a duplicate.
+                        dedup_key = (
+                            f"wa:dedup:{item_id}:{item.get('event', '')}"
+                            if kind == "calls" else f"wa:dedup:{item_id}"
+                        )
+                        if item_id and await redis.dedup_seen(dedup_key, ttl_s=600):
+                            logger.info("webhook duplicate %s dropped", item_id)
+                            continue
+                        phone = str(item.get("from") or "")
+                        # Messages only: call events are Meta-generated (a
+                        # handful per call) and dropping a terminate would
+                        # strand a live session.
+                        if kind == "messages" and phone and await redis.rate_limited(
+                            f"wa:rl:phone:{phone}", rate_per_min, window_s=60
+                        ):
+                            logger.warning("rate limited %s; message dropped", phone)
+                            continue
+                        kept.append(item)
+                    value[kind] = kept
+        return payload
+
+    return gate
 
 
 @router.get("/webhook")

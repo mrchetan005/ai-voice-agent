@@ -319,14 +319,16 @@ async def create_booking_service(
     event_type_id: int,
     timezone: str,
     source: str,
+    redis: Any = None,
 ) -> BookingService:
     """Construct + connect stores, load the caller profile, pre-seed the
     confirmed email from it (the prompt makes the agent verbally re-confirm
-    a stored email before booking with it)."""
+    a stored email before booking with it). `redis` is an optional
+    RedisGateway for the profile cache."""
     from whatsapp_agent.config import get_settings
 
     db_url = get_settings().database_url
-    profile_store = ProfileStore(db_url)
+    profile_store = ProfileStore(db_url, redis=redis)
     booking_store = BookingStore(db_url)
     await profile_store.connect()
     await booking_store.connect()

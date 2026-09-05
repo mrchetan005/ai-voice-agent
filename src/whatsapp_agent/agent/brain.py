@@ -44,11 +44,13 @@ from whatsapp_agent.agent.prompts import (
     VOICE_DELIVERY_NOTE,
     VOICE_RULES,
 )
-from whatsapp_agent.capabilities.booking.cal_client import CalClient
+from whatsapp_agent.capabilities.booking.cal_client import CalClient, get_slots_cached
 from whatsapp_agent.capabilities.booking.service import BookingService
 from whatsapp_agent.channels.client import WhatsAppClient
 
 logger = logging.getLogger("whatsapp_agent")
+
+_SNAPSHOT_TTL_S = 90.0
 
 # Brain LLM gateways (all OpenAI-compatible except gemini). BYOK gateways
 # (OpenRouter key vault, a self-hosted LiteLLM proxy) hold the provider
@@ -121,8 +123,10 @@ class BookingAgent:
         business_name: str = "our office",
         channel: str = "voice",  # "voice" (call relay) or "chat" (WA text)
         profile_note: str = "",
+        redis: Any = None,  # RedisGateway or None (slots cache layer)
     ) -> None:
         self._channel = channel
+        self._redis = redis
         self.service = service
         # Optional UsageMeter: token usage from every model invocation.
         self.meter: Any = None
@@ -138,6 +142,7 @@ class BookingAgent:
         self._persist_task: asyncio.Task[None] | None = None
         self._snapshot_task: asyncio.Task[None] | None = None
         self._slots_snapshot = ""
+        self._snapshot_at = 0.0
         # One turn at a time per caller: Gemini Live can fire a second
         # send_to_agent while the first is mid-tool; concurrent runs on the
         # same checkpointer thread corrupt state (dangling tool_calls).
@@ -148,12 +153,14 @@ class BookingAgent:
             """Fetch open appointment slots between two dates (YYYY-MM-DD,
             inclusive), local timezone. Returns JSON keyed by date. Fast —
             call whenever you need real availability. Never invent slots."""
-            slots = cal.get_slots(
-                event_type_id,
+            # Tools run in LangGraph's worker thread; the cache is async,
+            # so bridge onto the loop (same pattern as every other tool).
+            slots = self._run_on_loop(get_slots_cached(
+                cal, event_type_id,
                 dt.date.fromisoformat(start_date),
                 dt.date.fromisoformat(end_date),
-                timezone,
-            )
+                timezone, redis=self._redis,
+            ))
             # Trim to keep the context small: at most 6 slots per day.
             return json.dumps({day: entries[:6] for day, entries in slots.items()})
 
@@ -299,33 +306,32 @@ class BookingAgent:
         self._persist_task = asyncio.create_task(self._persist_loop())
         # Availability prefetch: most turns are slot questions; with a fresh
         # snapshot in the prompt the model answers in ONE call instead of
-        # tool-call -> fetch -> second call (cuts ~2-3 s per turn).
-        self._slots_snapshot = ""
-        self._snapshot_task = asyncio.create_task(self._refresh_slots_loop())
+        # tool-call -> fetch -> second call (cuts ~2-3 s per turn). Warmed
+        # in the background here, then kept fresh lazily per turn through
+        # the shared slots cache (no polling loop per agent).
+        self._snapshot_task = asyncio.create_task(self._refresh_snapshot())
         logger.info("booking agent ready (in-memory hot path, async postgres persistence)")
 
-    async def _refresh_slots_loop(self) -> None:
-        while True:
-            try:
-                today = dt.datetime.now(self._tz).date()
-                slots = await asyncio.to_thread(
-                    self._cal.get_slots,
-                    self._event_type_id,
-                    today + dt.timedelta(days=1),
-                    today + dt.timedelta(days=7),
-                    self._tz_name,
-                )
-                days = []
-                for day, entries in list(slots.items())[:7]:
-                    times = ",".join(
-                        e["start"][11:16] for e in entries[:8]
-                    )
-                    days.append(f"{day}: {times}")
-                self._slots_snapshot = "; ".join(days) or "no open slots next 7 days"
-                logger.debug("slots snapshot refreshed (%d days)", len(days))
-            except Exception as exc:
-                logger.warning("slots snapshot refresh failed: %s", exc)
-            await asyncio.sleep(120)
+    async def _refresh_snapshot(self) -> None:
+        if time.monotonic() - self._snapshot_at < _SNAPSHOT_TTL_S:
+            return
+        # Stamp first: a failing Cal API must not retry on every turn.
+        self._snapshot_at = time.monotonic()
+        try:
+            today = dt.datetime.now(self._tz).date()
+            slots = await get_slots_cached(
+                self._cal, self._event_type_id,
+                today + dt.timedelta(days=1), today + dt.timedelta(days=7),
+                self._tz_name, redis=self._redis,
+            )
+            days = [
+                f"{day}: {','.join(e['start'][11:16] for e in entries[:8])}"
+                for day, entries in list(slots.items())[:7]
+            ]
+            self._slots_snapshot = "; ".join(days) or "no open slots next 7 days"
+            logger.debug("slots snapshot refreshed (%d days)", len(days))
+        except Exception as exc:
+            logger.warning("slots snapshot refresh failed: %s", exc)
 
     async def stop(self) -> None:
         if self._snapshot_task is not None:
@@ -402,6 +408,7 @@ class BookingAgent:
         """Run one turn; returns the text to speak. Tool starts surface as
         status callbacks -> live spoken commentary."""
         assert self._agent is not None, "call start() first"
+        await self._refresh_snapshot()  # near-free when fresh (<90 s)
         now = dt.datetime.now(self._tz)
         snapshot = (
             f" [availability next 7 days, {self._tz_name} local times: "
