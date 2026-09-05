@@ -1,106 +1,97 @@
-"""WhatsApp agent CLI (dev + ops tool).
+"""WhatsApp agent CLI (dev + ops tool). Every command runs the same
+FastAPI app the production container runs — commands only differ in which
+managers start and whether an outbound call is placed.
 
-    uv run --env-file .env whatsapp-agent serve            # webhooks + inbound calls + chat
+    uv run --env-file .env whatsapp-agent serve            # everything (= production)
     uv run --env-file .env whatsapp-agent call             # outbound test call
     uv run --env-file .env whatsapp-agent call --provider split --voice kavita
     uv run --env-file .env whatsapp-agent inbound          # answer loop only
     uv run --env-file .env whatsapp-agent chat             # chat only
     uv run --env-file .env whatsapp-agent audit --days 7 --sample 10
 
-Needs a public HTTPS URL to the webhook port (ngrok in dev) configured in
-the Meta App dashboard with WHATSAPP_VERIFY_TOKEN, subscribed to `calls`
-and `messages`.
+Needs a public HTTPS URL to the webhook port (ngrok in dev; Caddy/your
+domain in production) configured in the Meta App dashboard with
+WHATSAPP_VERIFY_TOKEN, subscribed to `calls` and `messages`.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import logging
 import sys
 
-from whatsapp_agent.capabilities.booking.cal_client import CalClient
-from whatsapp_agent.channels.call_manager import PROVIDERS, CallManager
-from whatsapp_agent.channels.chat_manager import ChatManager
-from whatsapp_agent.channels.client import WhatsAppClient
-from whatsapp_agent.channels.events import WebhookHub
+import uvicorn
+from fastapi import FastAPI
+
+from whatsapp_agent.channels.call_manager import PROVIDERS
 from whatsapp_agent.config import get_settings, logging_setup
-from whatsapp_agent.infra.stores import SessionStore
 
 logger = logging.getLogger("whatsapp_agent")
 
 
-class _Runtime:
-    """Shared boot/teardown for every CLI command."""
-
-    def __init__(self, port: int) -> None:
-        self.hub = WebhookHub(port=port)
-        self.wa = WhatsAppClient()
-        self.cal = CalClient()
-        self.session_store = SessionStore(get_settings().database_url)
-
-    async def __aenter__(self) -> _Runtime:
-        await self.hub.start()
-        await self.session_store.connect()
-        self.calls = CallManager(self.hub.router, self.wa, self.cal, self.session_store)
-        self.chat = ChatManager(self.hub.router, self.wa, self.cal, self.session_store)
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        await self.chat.stop()
-        await self.calls.stop()
-        await self.session_store.close()
-        self.cal.close()
-        await self.wa.aclose()
-        await self.hub.stop()
+async def _run_app(app: FastAPI, port: int) -> tuple[uvicorn.Server, asyncio.Task]:
+    """Run uvicorn in-process; returns once startup (lifespan) finished."""
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_config=None)
+    server = uvicorn.Server(config)
+    task = asyncio.create_task(server.serve())
+    while not server.started and not task.done():
+        await asyncio.sleep(0.05)
+    if task.done():
+        task.result()  # surface the startup failure
+        raise RuntimeError("server exited during startup")
+    return server, task
 
 
 async def _cmd_serve(args: argparse.Namespace) -> int:
-    async with _Runtime(args.port) as rt:
-        await rt.calls.start()   # answer inbound calls
-        await rt.chat.start()    # handle chat
-        print(f"whatsapp-agent serving on :{args.port} (webhooks + calls + chat); Ctrl+C to stop")
-        with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.Future()
+    from whatsapp_agent.api.app import create_app
+
+    _, task = await _run_app(create_app(), args.port)
+    print(f"whatsapp-agent serving on :{args.port} (webhooks + calls + chat); Ctrl+C to stop")
+    await task  # uvicorn handles SIGINT/SIGTERM -> graceful lifespan shutdown
     return 0
 
 
-async def _cmd_call(args: argparse.Namespace) -> int:
-    from whatsapp_agent.channels.call_manager import CallBusy
-
-    async with _Runtime(args.port) as rt:
-        try:
-            return await rt.calls.run_outbound(
-                peer=args.to or None,
-                provider=args.provider,
-                brain=args.brain,
-                voice=args.voice,
-                skip_permission=args.skip_permission,
-                permission_only=args.permission_only,
-            )
-        except CallBusy:
-            print("another call is already active")
-            return 2
-
-
 async def _cmd_inbound(args: argparse.Namespace) -> int:
-    async with _Runtime(args.port) as rt:
-        await rt.calls.start()
-        print("inbound mode: waiting for calls — open the business chat on "
-              "WhatsApp and tap the call button")
-        with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.Future()
+    from whatsapp_agent.api.app import create_app
+
+    _, task = await _run_app(create_app(start_chat_manager=False), args.port)
+    print("inbound mode: waiting for calls — open the business chat on "
+          "WhatsApp and tap the call button")
+    await task
     return 0
 
 
 async def _cmd_chat(args: argparse.Namespace) -> int:
-    async with _Runtime(args.port) as rt:
-        await rt.chat.start()
-        print("chat mode: waiting for WhatsApp messages…")
-        with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.Future()
+    from whatsapp_agent.api.app import create_app
+
+    _, task = await _run_app(create_app(start_call_manager=False), args.port)
+    print("chat mode: waiting for WhatsApp messages…")
+    await task
     return 0
+
+
+async def _cmd_call(args: argparse.Namespace) -> int:
+    from whatsapp_agent.api.app import create_app
+    from whatsapp_agent.channels.call_manager import CallBusy
+
+    app = create_app(start_call_manager=False, start_chat_manager=False)
+    server, task = await _run_app(app, args.port)
+    try:
+        return await app.state.calls.run_outbound(
+            peer=args.to or None,
+            provider=args.provider,
+            brain=args.brain,
+            voice=args.voice,
+            skip_permission=args.skip_permission,
+            permission_only=args.permission_only,
+        )
+    except CallBusy:
+        print("another call is already active")
+        return 2
+    finally:
+        server.should_exit = True
+        await task
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

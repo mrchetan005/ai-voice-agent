@@ -1,4 +1,4 @@
-"""Read-only observability endpoints served by the webhook server.
+"""Read-only observability endpoints (admin router).
 
   GET /costs?days=N   (or ?since=<ISO8601>)  — per-session costs + totals,
                       the machine contract for a consumer agent
@@ -6,8 +6,9 @@
                       latency percentiles, flags, audit verdicts, costs
 
 Auth: `Authorization: Bearer $METRICS_TOKEN`. The server is publicly
-exposed (ngrok/Meta webhooks), so with METRICS_TOKEN unset the endpoints
-answer 404 — indistinguishable from not existing. Wrong token -> 401.
+exposed (Meta webhooks share the ingress), so with METRICS_TOKEN unset the
+endpoints answer 404 — indistinguishable from not existing. Wrong token ->
+401. These JSON contracts predate the FastAPI port and must not change.
 """
 
 from __future__ import annotations
@@ -16,7 +17,8 @@ import datetime as dt
 import logging
 from typing import Any
 
-from aiohttp import web
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
 from whatsapp_agent.infra.stores import SessionStore
 
@@ -45,14 +47,14 @@ class MetricsAPI:
     def __init__(self) -> None:
         self._session_store: SessionStore | None = None
 
-    def _auth(self, request: web.Request) -> web.Response | None:
+    def _auth(self, request: Request) -> JSONResponse | None:
         from whatsapp_agent.config import get_settings
 
         token = get_settings().metrics_token
         if not token:
-            return web.json_response({"error": "not found"}, status=404)
+            return JSONResponse({"error": "not found"}, status_code=404)
         if request.headers.get("Authorization") != f"Bearer {token}":
-            return web.json_response({"error": "unauthorized"}, status=401)
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
         return None
 
     async def _store(self) -> SessionStore | None:
@@ -72,9 +74,9 @@ class MetricsAPI:
         return store
 
     @staticmethod
-    def _window(request: web.Request, default_days: int) -> tuple[dt.datetime, dict[str, Any]]:
+    def _window(request: Request, default_days: int) -> tuple[dt.datetime, dict[str, Any]]:
         until = dt.datetime.now(dt.UTC)
-        if raw_since := request.query.get("since"):
+        if raw_since := request.query_params.get("since"):
             try:
                 since = dt.datetime.fromisoformat(raw_since)
                 if since.tzinfo is None:
@@ -84,7 +86,7 @@ class MetricsAPI:
             except ValueError:
                 pass  # fall through to days
         try:
-            days = int(request.query.get("days", default_days))
+            days = int(request.query_params.get("days", default_days))
         except ValueError:
             days = default_days
         days = min(max(days, 1), _MAX_DAYS)
@@ -93,12 +95,12 @@ class MetricsAPI:
 
     # -- GET /costs ---------------------------------------------------------
 
-    async def handle_costs(self, request: web.Request) -> web.Response:
+    async def handle_costs(self, request: Request) -> JSONResponse:
         if denied := self._auth(request):
             return denied
         store = await self._store()
         if store is None:
-            return web.json_response({"error": "database unavailable"}, status=503)
+            return JSONResponse({"error": "database unavailable"}, status_code=503)
         since, window = self._window(request, default_days=30)
         rows = await store.sessions_since(since)
 
@@ -125,7 +127,7 @@ class MetricsAPI:
                 "cost_usd": cost,
                 "cost_breakdown": row.get("cost_breakdown") or {},
             })
-        return web.json_response({
+        return JSONResponse({
             "generated_at": _iso(dt.datetime.now(dt.UTC)),
             "window": window,
             "currency": "USD",
@@ -141,12 +143,12 @@ class MetricsAPI:
 
     # -- GET /report ---------------------------------------------------------
 
-    async def handle_report(self, request: web.Request) -> web.Response:
+    async def handle_report(self, request: Request) -> JSONResponse:
         if denied := self._auth(request):
             return denied
         store = await self._store()
         if store is None:
-            return web.json_response({"error": "database unavailable"}, status=503)
+            return JSONResponse({"error": "database unavailable"}, status_code=503)
         since, window = self._window(request, default_days=7)
         rows = await store.sessions_since(since)
 
@@ -188,7 +190,7 @@ class MetricsAPI:
             for row in audited_rows[:5]
             if isinstance(row["audit"], dict)
         ]
-        return web.json_response({
+        return JSONResponse({
             "generated_at": _iso(dt.datetime.now(dt.UTC)),
             "window": window,
             "volume": {"total_sessions": total, "by_channel": by_channel,
@@ -217,3 +219,18 @@ class MetricsAPI:
                 "avg_per_session_usd": round(total_cost / total, 6) if total else 0.0,
             },
         })
+
+
+# One instance per process; the lazy store reconnects on demand.
+router = APIRouter()
+_metrics = MetricsAPI()
+
+
+@router.get("/costs")
+async def costs(request: Request) -> JSONResponse:
+    return await _metrics.handle_costs(request)
+
+
+@router.get("/report")
+async def report(request: Request) -> JSONResponse:
+    return await _metrics.handle_report(request)

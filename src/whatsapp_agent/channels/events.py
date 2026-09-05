@@ -8,9 +8,6 @@ Three layers, one file, because they share the queue vocabulary:
 - ``CallSession`` — everything one live call waits on (SDP answers,
   permission taps, texts, buttons, accepted/ended events). Satisfies
   ``InboundWaiter``, the ONLY protocol the booking domain sees.
-- ``WebhookHub`` — the aiohttp HTTP shell (verify + receive + admin
-  routes). Replaced by FastAPI in the API phase; the router underneath
-  stays.
 
 One call at a time is a CallManager policy, not a structural limit here:
 sessions are keyed by peer and matched by call_id, so concurrent calls are
@@ -26,10 +23,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
-from aiohttp import web
 from pydantic import BaseModel
-
-from whatsapp_agent.api.routes.admin import MetricsAPI
 
 logger = logging.getLogger("whatsapp_agent")
 
@@ -295,50 +289,3 @@ class TextBridge:
     def stop(self) -> None:
         if self._task is not None:
             self._task.cancel()
-
-
-class WebhookHub:
-    """aiohttp HTTP shell over the EventRouter (FastAPI replaces this in
-    the API phase; only this class changes then)."""
-
-    def __init__(self, verify_token: str | None = None, port: int = 8080) -> None:
-        from whatsapp_agent.config import get_settings
-
-        self._verify_token = verify_token or get_settings().whatsapp_verify_token
-        self._port = port
-        self.router = EventRouter()
-        self._metrics = MetricsAPI()
-        self._runner: web.AppRunner | None = None
-
-    async def _verify(self, request: web.Request) -> web.Response:
-        params = request.query
-        if (
-            params.get("hub.mode") == "subscribe"
-            and params.get("hub.verify_token") == self._verify_token
-        ):
-            return web.Response(text=params.get("hub.challenge", ""))
-        return web.Response(status=403, text="verify token mismatch")
-
-    async def _receive(self, request: web.Request) -> web.Response:
-        payload = await request.json()
-        self.router.dispatch(payload)
-        # Always 200 fast — Meta retries aggressively on anything else.
-        return web.Response(text="ok")
-
-    async def start(self) -> None:
-        app = web.Application()
-        app.router.add_get("/webhook", self._verify)
-        app.router.add_post("/webhook", self._receive)
-        # Observability (bearer-token gated; 404 when METRICS_TOKEN unset).
-        app.router.add_get("/report", self._metrics.handle_report)
-        app.router.add_get("/costs", self._metrics.handle_costs)
-        self._runner = web.AppRunner(app)
-        await self._runner.setup()
-        site = web.TCPSite(self._runner, "0.0.0.0", self._port)
-        await site.start()
-        logger.info("webhook server on :%d/webhook", self._port)
-
-    async def stop(self) -> None:
-        if self._runner is not None:
-            await self._runner.cleanup()
-            self._runner = None

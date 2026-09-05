@@ -24,7 +24,9 @@ booking = [
     "langchain-openai>=0.2",
     "pydantic-settings>=2.4",
     "aiortc>=1.9",
-    "aiohttp>=3.10",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "redis>=5.0",
 ]
 
 [project.scripts]
