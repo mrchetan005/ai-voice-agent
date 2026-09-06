@@ -5,8 +5,9 @@ these methods directly; LangGraph tools bridge via _run_on_loop. Keeping
 the bodies here is what prevents the two tool sets from drifting — the old
 duplicated book_appointment produced two separate placeholder-email bugs.
 
-Email policy: booking REQUIRES an email that the caller has confirmed via
-WhatsApp reply buttons (or a stored profile email). There is no placeholder
+Email policy: booking REQUIRES an email the caller has confirmed — by voice
+read-back on a call (confirm_email_by_voice), a WhatsApp Confirm tap in chat
+or as a fallback, or a stored profile email. There is no placeholder
 fallback — a fake address means Cal.com mails the invite to nobody.
 """
 
@@ -37,8 +38,23 @@ EMAIL_REQUEST_TEXT = (
 EMAIL_EDIT_TEXT = "No problem — please type the correct email address here."
 
 
+_MANAGE_URL = "https://cal.com/booking/{uid}"
+
+
+def _links_block(uid: str, meeting_url: str | None) -> list[str]:
+    """Self-service management link (always, from the uid) + meeting join link
+    (only when the event has an online location) for a WhatsApp confirmation."""
+    lines: list[str] = []
+    if uid:
+        lines.append(f"🔗 Manage/reschedule: {_MANAGE_URL.format(uid=uid)}")
+    if meeting_url and str(meeting_url).startswith("http"):
+        lines.append(f"🎥 Join: {meeting_url}")
+    return lines
+
+
 def format_confirmation(
-    when_local: dt.datetime, timezone: str, topic: str, uid: str
+    when_local: dt.datetime, timezone: str, topic: str, uid: str,
+    meeting_url: str | None = None,
 ) -> str:
     """Human-readable WhatsApp confirmation (WA markdown: *bold*, _italic_).
 
@@ -49,16 +65,21 @@ def format_confirmation(
     lines = ["✅ *Appointment Confirmed*", "", f"📅 {when}", f"🌏 {timezone}"]
     if topic.strip():
         lines.append(f"📝 {topic.strip()}")
+    if links := _links_block(uid, meeting_url):
+        lines += ["", *links]
     lines += ["", f"Ref: {uid}", "_Reply here if you need to reschedule._"]
     return "\n".join(lines)
 
 
-def format_reschedule(when_local: dt.datetime, timezone: str, uid: str) -> str:
+def format_reschedule(
+    when_local: dt.datetime, timezone: str, uid: str, meeting_url: str | None = None
+) -> str:
     when = when_local.strftime("%A, %d %B %Y at %I:%M %p")
-    return "\n".join([
-        "🔁 *Appointment Rescheduled*", "", f"📅 {when}", f"🌏 {timezone}",
-        "", f"Ref: {uid}", "_Reply here if you need anything else._",
-    ])
+    lines = ["🔁 *Appointment Rescheduled*", "", f"📅 {when}", f"🌏 {timezone}"]
+    if links := _links_block(uid, meeting_url):
+        lines += ["", *links]
+    lines += ["", f"Ref: {uid}", "_Reply here if you need anything else._"]
+    return "\n".join(lines)
 
 
 def format_cancellation(uid: str) -> str:
@@ -198,6 +219,16 @@ class BookingService:
         self.confirmed_email = email
         self._bg(self.profile_store.upsert(self.recipient, email=email))
 
+    def confirm_email_by_voice(self, email: str) -> dict[str, Any]:
+        """Voice path: the caller spelled their email and said yes to the
+        read-back. Sets the booking gate directly — no WhatsApp round trip."""
+        email = (email or "").strip()
+        if not EMAIL_RE.fullmatch(email):
+            return {"status": "INVALID_EMAIL"}
+        self.confirmed_email = email
+        self._bg(self.profile_store.upsert(self.recipient, email=email))
+        return {"status": "CONFIRMED", "email": email}
+
     # -- booking ------------------------------------------------------------
 
     async def book(
@@ -211,10 +242,10 @@ class BookingService:
         email = (email or "").strip()
         if not email or not EMAIL_RE.fullmatch(email):
             return {"status": "EMAIL_REQUIRED",
-                    "hint": "collect an email and confirm it on WhatsApp first"}
+                    "hint": "collect the email by voice, read it back, then confirm_email"}
         if email != self.confirmed_email:
             return {"status": "EMAIL_NOT_CONFIRMED",
-                    "hint": "confirm this exact email via confirm_email_on_whatsapp first"}
+                    "hint": "read this exact email back and lock it with confirm_email first"}
         if not book_anyway:
             existing = await self.booking_store.list_upcoming(self.recipient)
             if existing:
@@ -240,8 +271,10 @@ class BookingService:
             self.session_errors.append({"op": "book", "error": str(exc)[:200]})
             return {"status": "FAILED", "error": str(exc)[:200]}
         uid = booking.get("uid", "")
+        meeting_url = booking.get("location") or booking.get("meetingUrl")
         self._bg(self.wa.send_text(
-            self.recipient, format_confirmation(parsed, self.timezone, topic, uid)
+            self.recipient,
+            format_confirmation(parsed, self.timezone, topic, uid, meeting_url),
         ))
         self._count_wa()
         self._bg(self.booking_store.add(self.recipient, uid, parsed.astimezone(dt.UTC), topic))
@@ -297,7 +330,8 @@ class BookingService:
         new_uid = moved.get("uid", "") or uid
         self._bg(self.booking_store.replace_uid(uid, new_uid, parsed.astimezone(dt.UTC)))
         self._bg(self.wa.send_text(
-            self.recipient, format_reschedule(parsed, self.timezone, new_uid)
+            self.recipient,
+            format_reschedule(parsed, self.timezone, new_uid, moved.get("location")),
         ))
         self._count_wa()
         self.session_actions.append({

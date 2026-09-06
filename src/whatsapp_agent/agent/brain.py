@@ -24,6 +24,7 @@ import datetime as dt
 import json
 import logging
 import os
+import re
 import sys
 import time
 from collections.abc import Awaitable, Callable
@@ -49,6 +50,13 @@ from whatsapp_agent.capabilities.booking.service import BookingService
 from whatsapp_agent.channels.client import WhatsAppClient
 
 logger = logging.getLogger("whatsapp_agent")
+
+# Safety net for dual-brain hangups: if the brain says goodbye but forgets to
+# call end_call, we hang up after a grace window (mirrors single-brain).
+_FAREWELL_RE = re.compile(
+    r"\b(good\s?bye|bye+|alvida|अलविदा|फिर मिलेंगे|take care)[\s.!।]*$",
+    re.IGNORECASE,
+)
 
 _SNAPSHOT_TTL_S = 90.0
 
@@ -124,10 +132,15 @@ class BookingAgent:
         channel: str = "voice",  # "voice" (call relay) or "chat" (WA text)
         profile_note: str = "",
         redis: Any = None,  # RedisGateway or None (slots cache layer)
+        end_call_cb: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._channel = channel
         self._redis = redis
         self.service = service
+        # Voice hangup: set only in dual-brain call mode (None in chat).
+        self._end_call_cb = end_call_cb
+        self._pending_end: asyncio.Task[None] | None = None
+        self._ending = False
         # Optional UsageMeter: token usage from every model invocation.
         self.meter: Any = None
         self._cal = cal
@@ -185,17 +198,28 @@ class BookingAgent:
             ))
 
         @tool
+        def confirm_email(email: str) -> str:
+            """Lock in the caller's email on a VOICE call. Call this only
+            AFTER you have read the email back aloud (spell the part before
+            the @, letter by letter) and the caller said yes. No WhatsApp
+            message is sent. Required before booking. Returns CONFIRMED, or
+            INVALID_EMAIL (apologize, ask again and read it back)."""
+            return json.dumps(service.confirm_email_by_voice(email))
+
+        @tool
         def request_email_over_whatsapp(wait_seconds: int = 45) -> str:
-            """Send the caller a WhatsApp text asking for their email and
-            wait for the reply. Use while telling the caller you've sent it.
-            Email is REQUIRED before booking. Returns the email, or NO_REPLY
-            if none arrives in time (you may call again to keep waiting)."""
+            """FALLBACK ONLY (prefer confirming by voice): send the caller a
+            WhatsApp text asking for their email and wait for the reply. Use
+            only if the caller asks to type it, or you cannot hear the email
+            after two careful read-backs. Returns the email, or NO_REPLY if
+            none arrives in time (you may call again to keep waiting)."""
             wait_s = float(min(max(wait_seconds, 10), 50))
             return json.dumps(self._run_on_loop(service.request_email(wait_s)))
 
         @tool
         def confirm_email_on_whatsapp(email: str) -> str:
-            """Send the collected email back on WhatsApp with Confirm/Edit
+            """FALLBACK for chat, or a voice caller who asked to confirm in
+            writing: send the email back on WhatsApp with Confirm/Edit
             buttons. Booking is blocked until the caller confirms. On voice
             calls this waits for the tap (call again on NO_REPLY); in chat
             the tap arrives as the caller's next message — do NOT book until
@@ -231,6 +255,17 @@ class BookingAgent:
                 service.reschedule(booking_uid, new_start_local_iso)
             ))
 
+        @tool
+        def end_call() -> str:
+            """Hang up the phone call. Call this right after a brief goodbye
+            once everything the caller needed is done, or immediately if the
+            caller asks to end, cut, stop, or hang up the call. Voice only."""
+            if self._end_call_cb is None:
+                return json.dumps({"status": "UNSUPPORTED"})
+            self._ending = True
+            self._fire_and_forget(self._end_call_cb())
+            return json.dumps({"status": "ENDING"})
+
         self._llm, self._llm_cost_provider = make_brain_llm(model)
         manage_tools = [
             confirm_email_on_whatsapp, list_my_bookings,
@@ -247,8 +282,8 @@ class BookingAgent:
             )
         else:
             self._tools = [
-                get_available_slots, book_appointment,
-                request_email_over_whatsapp, *manage_tools,
+                get_available_slots, book_appointment, confirm_email,
+                request_email_over_whatsapp, *manage_tools, end_call,
             ]
             self._prompt = (
                 VOICE_RULES.format(business_name=business_name)
@@ -335,6 +370,9 @@ class BookingAgent:
             logger.warning("slots snapshot refresh failed: %s", exc)
 
     async def stop(self) -> None:
+        if self._pending_end is not None:
+            self._pending_end.cancel()
+            self._pending_end = None
         if self._snapshot_task is not None:
             self._snapshot_task.cancel()
         if self._persist_task is not None:
@@ -409,6 +447,11 @@ class BookingAgent:
         """Run one turn; returns the text to speak. Tool starts surface as
         status callbacks -> live spoken commentary."""
         assert self._agent is not None, "call start() first"
+        # A new turn means the caller kept talking — cancel any pending
+        # farewell hangup queued by the last reply.
+        if self._pending_end is not None:
+            self._pending_end.cancel()
+            self._pending_end = None
         await self._refresh_snapshot()  # near-free when fresh (<90 s)
         now = dt.datetime.now(self._tz)
         snapshot = (
@@ -468,7 +511,29 @@ class BookingAgent:
                 self._persist_queue.put_nowait((thread_id, "user", text))
                 if final:
                     self._persist_queue.put_nowait((thread_id, "assistant", final))
-            return final.strip()
+            reply = final.strip()
+            # Backstop: the brain said goodbye but didn't call end_call. Hang
+            # up after a grace window so the goodbye is heard first; a follow-up
+            # turn cancels this (see top of respond).
+            if (
+                self._end_call_cb is not None
+                and not self._ending
+                and reply
+                and _FAREWELL_RE.search(reply)
+            ):
+                self._pending_end = asyncio.create_task(self._delayed_end())
+            return reply
+
+    async def _delayed_end(self) -> None:
+        try:
+            await asyncio.sleep(6.0)
+        except asyncio.CancelledError:
+            return
+        if self._ending or self._end_call_cb is None:
+            return
+        self._ending = True
+        with contextlib.suppress(Exception):
+            await self._end_call_cb()
 
     async def _heal_dangling_tool_calls(self, config: dict[str, Any]) -> list[Any]:
         """Repair a thread whose last checkpoint is an AIMessage with

@@ -107,6 +107,10 @@ def build_native_tools(
         wait_s = min(max(EmailWaitArgs.model_validate(args).wait_seconds or 45.0, 10.0), 90.0)
         return await service.request_email(wait_s)
 
+    async def confirm_email(args: dict[str, Any]) -> dict[str, Any]:
+        request = EmailConfirmArgs.model_validate(args)
+        return service.confirm_email_by_voice(request.email)
+
     async def confirm_email_on_whatsapp(args: dict[str, Any]) -> dict[str, Any]:
         request = EmailConfirmArgs.model_validate(args)
         sent = await service.send_email_confirmation(request.email)
@@ -173,13 +177,34 @@ def build_native_tools(
             },
             "handler": book_appointment,
         },
+        "confirm_email": {
+            "declaration": {
+                "name": "confirm_email",
+                "description": "Lock in the caller's email for booking — the "
+                               "PREFERRED way on a voice call. Call this only "
+                               "AFTER reading the email back aloud (spell the "
+                               "part before the @ letter by letter) and the "
+                               "caller confirmed it. No WhatsApp message is "
+                               "sent. Returns CONFIRMED or INVALID_EMAIL "
+                               "(apologize and ask again).",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "email": {"type": "STRING"},
+                    },
+                    "required": ["email"],
+                },
+            },
+            "handler": confirm_email,
+        },
         "request_email_over_whatsapp": {
             "declaration": {
                 "name": "request_email_over_whatsapp",
-                "description": "Send the caller a WhatsApp text asking for "
-                               "their email and wait for the reply. Tell the "
-                               "caller you've sent it while waiting. Email is "
-                               "REQUIRED before booking.",
+                "description": "FALLBACK ONLY. Send the caller a WhatsApp text "
+                               "asking for their email and wait for the reply. "
+                               "Use only if the caller asks to type it, or you "
+                               "cannot make out the email after two careful "
+                               "read-backs. Prefer confirm_email by voice.",
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {
@@ -192,11 +217,12 @@ def build_native_tools(
         "confirm_email_on_whatsapp": {
             "declaration": {
                 "name": "confirm_email_on_whatsapp",
-                "description": "Send the collected email back to the caller "
-                               "on WhatsApp with Confirm/Edit buttons and "
-                               "wait for their tap. Booking is blocked until "
-                               "this returns CONFIRMED. On NO_REPLY you may "
-                               "call it again to keep waiting.",
+                "description": "FALLBACK. Send the collected email back to the "
+                               "caller on WhatsApp with Confirm/Edit buttons "
+                               "and wait for their tap. Use only if the caller "
+                               "asked to confirm in writing. Booking is blocked "
+                               "until this returns CONFIRMED. On NO_REPLY you "
+                               "may call it again to keep waiting.",
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {

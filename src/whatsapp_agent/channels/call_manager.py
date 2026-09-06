@@ -460,12 +460,19 @@ class CallManager:
                     self.cal, self.wa, session, spec.peer, event_type_id,
                     timezone, "whatsapp-voice-agent", redis=self.redis,
                 )
+
+                async def _end_call() -> None:
+                    # Grace so the brain's goodbye audio finishes relaying
+                    # before the WebRTC leg tears down.
+                    await asyncio.sleep(3.5)
+                    session.ended.set()
+
                 booking_agent = BookingAgent(
                     self.cal, event_type_id, self.wa, spec.peer, service,
                     timezone=timezone, business_name=business,
                     model=await self.config.resolve("scheduler_model"),
                     profile_note=render_profile_block(service.profile),
-                    redis=self.redis,
+                    redis=self.redis, end_call_cb=_end_call,
                 )
                 booking_agent.meter = meter
                 await booking_agent.start()
