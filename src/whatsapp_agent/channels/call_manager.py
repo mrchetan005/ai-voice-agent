@@ -19,6 +19,8 @@ import re
 import uuid
 from dataclasses import dataclass
 
+import httpx
+
 from voiceagent import OrchestratorBridge, SessionConfig
 from voiceagent.guardrails_and_eval import GuardrailPipeline, TelemetryRecorder
 from voiceagent.providers import (
@@ -391,19 +393,30 @@ class CallManager:
                 except Exception as exc:
                     logger.warning("enable_calling: %s", exc)
                 if not skip_permission:
-                    await self.wa.send_permission_request(
-                        peer,
-                        "We'd like to call you on WhatsApp to schedule your appointment.",
-                    )
-                    logger.info("permission request sent — waiting for Accept…")
                     try:
-                        accepted = await session.wait_permission(timeout_s=300)
-                    except TimeoutError:
-                        logger.warning("permission request timed out")
-                        return 1
-                    logger.info("permission: %s", "ACCEPTED" if accepted else "REJECTED")
-                    if permission_only or not accepted:
-                        return 0 if accepted else 1
+                        await self.wa.send_permission_request(
+                            peer,
+                            "We'd like to call you on WhatsApp to schedule your appointment.",
+                        )
+                    except httpx.HTTPStatusError as exc:
+                        # Meta 138017: the user granted PERMANENT permission
+                        # earlier — a new request is rejected, but dialing is
+                        # allowed. Success condition, not an error.
+                        if "138017" not in exc.response.text:
+                            raise
+                        logger.info("call permission already granted permanently — dialing")
+                        if permission_only:
+                            return 0
+                    else:
+                        logger.info("permission request sent — waiting for Accept…")
+                        try:
+                            accepted = await session.wait_permission(timeout_s=300)
+                        except TimeoutError:
+                            logger.warning("permission request timed out")
+                            return 1
+                        logger.info("permission: %s", "ACCEPTED" if accepted else "REJECTED")
+                        if permission_only or not accepted:
+                            return 0 if accepted else 1
                 spec = CallSpec(
                     peer=peer, direction="outbound", provider=provider,
                     brain=brain, voice=voice, call_ref=call_ref,
