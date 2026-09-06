@@ -31,11 +31,11 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import psycopg
+from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.prebuilt import create_react_agent
 
 from whatsapp_agent.agent.prompts import (
     AVAILABILITY_GUIDE,
@@ -287,8 +287,9 @@ class BookingAgent:
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
-        self._agent = create_react_agent(
-            self._llm, self._tools, prompt=self._prompt, checkpointer=InMemorySaver()
+        self._agent = create_agent(
+            self._llm, self._tools,
+            system_prompt=self._prompt, checkpointer=InMemorySaver(),
         )
         self._seeded: set[str] = set()
         self._persist_queue: asyncio.Queue[tuple[str, str, str]] = asyncio.Queue(maxsize=256)
@@ -426,7 +427,8 @@ class BookingAgent:
             try:
                 async with asyncio.timeout(60):
                     async for event in self._agent.astream_events(
-                        {"messages": [("user", stamped)]}, config=config, version="v2"
+                        {"messages": [{"role": "user", "content": stamped}]},
+                        config=config,
                     ):
                         kind = event.get("event")
                         if kind == "on_chat_model_end":

@@ -18,7 +18,8 @@ local = ["sounddevice>=0.5"]
 langchain = ["langchain-core>=0.3"]
 crewai = ["crewai>=1.15"]
 booking = [
-    "langgraph>=0.2",
+    "langchain>=1.0",
+    "langgraph>=1.0",
     "psycopg[binary]>=3.2",
     "langchain-google-genai>=2.0",
     "langchain-openai>=0.2",
