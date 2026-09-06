@@ -140,6 +140,19 @@ class EventRouter:
             return next(iter(self._sessions.values()))
         return None
 
+    def _session_by_call_id(self, call_id: str) -> CallSession | None:
+        """Strict call-id match for lifecycle-END events. Meta redelivers a
+        previous call's terminate late (a different call_id), so this must
+        NEVER fall back to the sole active session — doing so kills the live
+        call. Returns None until the session's call_id is known (the 90s
+        accepted-wait timeout covers a call that terminates before connect)."""
+        if not call_id:
+            return None
+        for session in self._sessions.values():
+            if session.call_id and session.call_id == call_id:
+                return session
+        return None
+
     def _session_for_peer(self, peer: str) -> CallSession | None:
         """Match a MESSAGE to a session: strict sender match only — another
         peer's texts must never be claimed by someone else's call."""
@@ -162,12 +175,14 @@ class EventRouter:
         for status in value.get("statuses", []) or []:
             if str(status.get("type", "")).lower() == "call" or "call" in str(status)[:200].lower():
                 state = str(status.get("status", "")).lower()
-                session = self._session_for(call_id=str(status.get("id", "")))
-                if session is None:
-                    continue
-                if state == "accepted":
+                status_id = str(status.get("id", ""))
+                if state == "accepted" and (
+                    session := self._session_for(call_id=status_id)
+                ) is not None:
                     session.accepted.set()
-                elif state in ("terminated", "failed", "rejected", "ended", "completed"):
+                elif state in ("terminated", "failed", "rejected", "ended", "completed") and (
+                    session := self._session_by_call_id(status_id)
+                ) is not None:
                     session.ended.set()
 
     def _route_call(self, call: dict[str, Any]) -> None:
@@ -193,7 +208,7 @@ class EventRouter:
             else:
                 logger.warning("SDP answer with no open call session; dropped")
         if event in ("terminate", "terminated", "failed", "rejected", "ended") and (
-            session := self._session_for(call_id, str(call.get("from", "")))
+            session := self._session_by_call_id(call_id)
         ) is not None:
             session.ended.set()
 

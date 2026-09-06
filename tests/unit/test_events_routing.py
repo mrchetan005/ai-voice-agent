@@ -94,10 +94,26 @@ async def main() -> int:
     ]}}]}]})
     check("status ACCEPTED -> session.accepted", session.accepted.is_set())
 
+    # A stale/duplicate terminate for a PREVIOUS call (different call_id, and
+    # from=business number on BUSINESS_INITIATED) must NOT end the live call.
+    # This is the cross-call cutoff: Meta redelivers an old terminate late.
+    router.dispatch({"entry": [{"changes": [{"field": "calls", "value": {"calls": [
+        {"id": "call-0", "event": "terminate", "from": "15551927186",
+         "direction": "BUSINESS_INITIATED"},
+    ]}}]}]})
+    check("stale terminate for a DIFFERENT call_id does NOT end the live call",
+          not session.ended.is_set())
+
+    router.dispatch({"entry": [{"changes": [{"field": "calls", "value": {"statuses": [
+        {"type": "call", "id": "call-0", "status": "TERMINATED"},
+    ]}}]}]})
+    check("stale TERMINATED status for a different call_id does NOT end the call",
+          not session.ended.is_set())
+
     router.dispatch({"entry": [{"changes": [{"field": "calls", "value": {"calls": [
         {"id": "call-1", "event": "terminate"},
     ]}}]}]})
-    check("terminate -> session.ended", session.ended.is_set())
+    check("terminate for the MATCHING call_id -> session.ended", session.ended.is_set())
 
     waiter = asyncio.create_task(session.wait_button(timeout_s=2.0))
     await asyncio.sleep(0.05)
