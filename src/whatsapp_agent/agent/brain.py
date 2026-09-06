@@ -422,12 +422,13 @@ class BookingAgent:
         async with lock:
             if thread_id not in self._seeded:
                 await self._seed_thread(thread_id, config)
-            await self._heal_dangling_tool_calls(config)
+            repairs = await self._heal_dangling_tool_calls(config)
             final = ""
             try:
                 async with asyncio.timeout(60):
                     async for event in self._agent.astream_events(
-                        {"messages": [{"role": "user", "content": stamped}]},
+                        {"messages": [*repairs,
+                                      {"role": "user", "content": stamped}]},
                         config=config,
                     ):
                         kind = event.get("event")
@@ -469,31 +470,36 @@ class BookingAgent:
                     self._persist_queue.put_nowait((thread_id, "assistant", final))
             return final.strip()
 
-    async def _heal_dangling_tool_calls(self, config: dict[str, Any]) -> None:
+    async def _heal_dangling_tool_calls(self, config: dict[str, Any]) -> list[Any]:
         """Repair a thread whose last checkpoint is an AIMessage with
         unanswered tool_calls (a cancelled/timed-out/barged-in turn).
         Without this, every later turn raises
         'Found AIMessages with tool_calls that do not have a corresponding
-        ToolMessage' — permanently bricking the caller's thread."""
+        ToolMessage' — permanently bricking the caller's thread.
+
+        Returns ToolMessages to PREPEND to the next turn's input instead of
+        writing them via aupdate_state: a state update re-runs the graph's
+        routing as some inferred node, which crashed (KeyError 'model' /
+        InvalidUpdateError) on the create_agent graph."""
         from langchain_core.messages import ToolMessage
 
         state = await self._agent.aget_state(config)
         messages = (state.values or {}).get("messages", []) if state else []
         if not messages:
-            return
+            return []
         last = messages[-1]
         tool_calls = getattr(last, "tool_calls", None) or []
         if not tool_calls:
-            return
-        await self._agent.aupdate_state(config, {"messages": [
+            return []
+        logger.info("healing %d dangling tool call(s)", len(tool_calls))
+        return [
             ToolMessage(
                 content="(interrupted — the caller spoke before this finished; "
                         "re-run the tool if still relevant)",
                 tool_call_id=tc["id"],
             )
             for tc in tool_calls
-        ]})
-        logger.info("healed %d dangling tool call(s)", len(tool_calls))
+        ]
 
     @staticmethod
     def _extract_text(message: Any) -> str:
