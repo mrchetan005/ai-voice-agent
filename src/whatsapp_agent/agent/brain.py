@@ -204,7 +204,7 @@ class BookingAgent:
             the @, letter by letter) and the caller said yes. No WhatsApp
             message is sent. Required before booking. Returns CONFIRMED, or
             INVALID_EMAIL (apologize, ask again and read it back)."""
-            return json.dumps(service.confirm_email_by_voice(email))
+            return json.dumps(self._run_on_loop(service.confirm_email_by_voice(email)))
 
         @tool
         def request_email_over_whatsapp(wait_seconds: int = 45) -> str:

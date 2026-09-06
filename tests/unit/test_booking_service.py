@@ -200,6 +200,25 @@ async def main() -> int:
           listing["bookings"][0]["uid"] == "uid-1"
           and "when_local" in listing["bookings"][0])
 
+    # -- voice email confirm (no WhatsApp round trip) --------------------------
+    # Regression: confirm_email_by_voice must be async so the dual-brain tool
+    # can bridge it onto the loop; a sync version crashed the LangGraph worker
+    # thread with "no running event loop" the moment _bg() ran.
+    result = await service.confirm_email_by_voice("garbage")
+    check("voice confirm: garbage -> INVALID_EMAIL", result["status"] == "INVALID_EMAIL")
+
+    result = await service.confirm_email_by_voice("voice@x.com")
+    check("voice confirm: valid -> CONFIRMED and gate set",
+          result["status"] == "CONFIRMED" and service.confirmed_email == "voice@x.com")
+    await asyncio.sleep(0.05)  # let the fire-and-forget profile upsert land
+    check("voice-confirmed email upserted to profile",
+          any(u["email"] == "voice@x.com" for u in profiles.upserts))
+
+    result = await service.book(
+        "2026-09-18T15:00:00", "Chetan", "voice demo", "voice@x.com", book_anyway=True
+    )
+    check("voice-confirmed email unlocks booking", result["status"] == "BOOKED")
+
     print(f"\n{'ALL PASS' if not failures else f'{len(failures)} FAILURE(S): {failures}'}")
     return 0 if not failures else 1
 

@@ -109,7 +109,7 @@ def build_native_tools(
 
     async def confirm_email(args: dict[str, Any]) -> dict[str, Any]:
         request = EmailConfirmArgs.model_validate(args)
-        return service.confirm_email_by_voice(request.email)
+        return await service.confirm_email_by_voice(request.email)
 
     async def confirm_email_on_whatsapp(args: dict[str, Any]) -> dict[str, Any]:
         request = EmailConfirmArgs.model_validate(args)

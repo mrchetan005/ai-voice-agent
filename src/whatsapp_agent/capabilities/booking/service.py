@@ -219,9 +219,12 @@ class BookingService:
         self.confirmed_email = email
         self._bg(self.profile_store.upsert(self.recipient, email=email))
 
-    def confirm_email_by_voice(self, email: str) -> dict[str, Any]:
+    async def confirm_email_by_voice(self, email: str) -> dict[str, Any]:
         """Voice path: the caller spelled their email and said yes to the
-        read-back. Sets the booking gate directly — no WhatsApp round trip."""
+        read-back. Sets the booking gate directly — no WhatsApp round trip.
+
+        Async so it runs ON the event loop: the dual-brain LangGraph tool
+        bridges here via _run_on_loop, and _bg() needs a running loop."""
         email = (email or "").strip()
         if not EMAIL_RE.fullmatch(email):
             return {"status": "INVALID_EMAIL"}

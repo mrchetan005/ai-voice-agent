@@ -16,12 +16,13 @@ from whatsapp_agent.agent.prompts import DUAL_BRAIN_GREET_TRIGGER
 
 logger = logging.getLogger("whatsapp_agent")
 
-# Tool name -> speakable step for the live-commentary engine.
+# Tool name -> speakable step for the live-commentary engine. ONLY the slow,
+# user-meaningful operations are narrated; instant tools (confirm_email,
+# end_call) and the WhatsApp fallbacks are silent — narrating every tool
+# made the call feel repetitive, and voice calls shouldn't announce messages.
 _STEP_NAMES = {
     "get_available_slots": "checking_the_calendar",
     "book_appointment": "booking_the_slot",
-    "request_email_over_whatsapp": "sending_you_a_whatsapp_message",
-    "confirm_email_on_whatsapp": "sending_the_confirmation_buttons",
     "list_my_bookings": "checking_your_bookings",
     "cancel_appointment": "cancelling_that",
     "reschedule_appointment": "moving_your_booking",
@@ -38,7 +39,10 @@ class BookingCall:
 
     async def handler(self, ctx: Any) -> str | None:
         async def status_cb(tool_name: str) -> None:
-            await ctx.status(_STEP_NAMES.get(tool_name, tool_name))
+            # Only narrate the slow, user-meaningful tools; stay silent for the
+            # rest so the caller doesn't hear a status line before every reply.
+            if step := _STEP_NAMES.get(tool_name):
+                await ctx.status(step)
 
         self.session_turns.append(("user", ctx.text))
         try:

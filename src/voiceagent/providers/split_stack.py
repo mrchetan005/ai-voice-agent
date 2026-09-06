@@ -43,7 +43,6 @@ class SplitStackProxy(BaseVoiceAgentProxy):
         self._speech_started_at: float = 0.0
         self._turn_end_at: float = 0.0
         self._warm_task: asyncio.Task[int] | None = None
-        self._filler_task: asyncio.Task[None] | None = None
 
     async def _connect(self) -> None:
         started = time.monotonic()
@@ -73,35 +72,13 @@ class SplitStackProxy(BaseVoiceAgentProxy):
                     _record(self, "asr_latency",
                             (time.monotonic() - self._speech_started_at) * 1000.0)
                     self._speech_started_at = 0.0
-                # Acknowledge with a short filler ONLY if the agent is slow to
-                # reply — a beat's delay stops a "Hold on" landing before every
-                # quick answer. speak_text cancels it the instant real speech
-                # is ready.
-                self._schedule_filler()
+                # No blind acknowledgment filler: it fired on EVERY turn (the
+                # brain reliably takes ~2s) and always spoke the same "Hold on",
+                # which callers found repetitive. The bridge's status commentary
+                # narrates the genuinely slow tools (calendar, booking) instead.
                 await self.on_user_transcript(payload)
 
-    def _schedule_filler(self) -> None:
-        if self._bridge is None:
-            return
-        self._cancel_filler()
-        self._filler_task = asyncio.create_task(self._delayed_filler())
-
-    async def _delayed_filler(self) -> None:
-        try:
-            await asyncio.sleep(1.3)
-        except asyncio.CancelledError:
-            return
-        if (self._bridge is not None and self._audio_out.qsize() == 0
-                and self.state is not SessionState.SPEAKING):
-            self._bridge.commentary.speak_cached_filler()
-
-    def _cancel_filler(self) -> None:
-        if self._filler_task is not None:
-            self._filler_task.cancel()
-            self._filler_task = None
-
     async def speak_text(self, text: str, *, interrupt: bool = False) -> None:
-        self._cancel_filler()
         if interrupt:
             await self.tts.cancel()
             await self.interrupt_playback()
