@@ -44,6 +44,7 @@ def create_app(
         from whatsapp_agent.channels.chat_manager import ChatManager
         from whatsapp_agent.channels.client import WhatsAppClient
         from whatsapp_agent.infra.redis import RedisGateway
+        from whatsapp_agent.infra.runtime_config import RuntimeConfig
         from whatsapp_agent.infra.stores import SessionStore
 
         if not settings.whatsapp_app_secret:
@@ -63,8 +64,13 @@ def create_app(
         cal = CalClient()
         session_store = SessionStore(settings.database_url)
         await session_store.connect()
-        calls = CallManager(app.state.router, wa, cal, session_store, redis=redis)
-        chat = ChatManager(app.state.router, wa, cal, session_store, redis=redis)
+        config = RuntimeConfig(settings.database_url, redis=redis)
+        await config.connect()
+        app.state.config = config
+        calls = CallManager(app.state.router, wa, cal, session_store,
+                            redis=redis, config=config)
+        chat = ChatManager(app.state.router, wa, cal, session_store,
+                           redis=redis, config=config)
         app.state.wa = wa
         app.state.cal = cal
         app.state.session_store = session_store
@@ -86,6 +92,7 @@ def create_app(
                     await chat.stop()
                     await calls.stop()
             await session_store.close()
+            await config.close()
             cal.close()
             await wa.aclose()
             await redis.aclose()
@@ -101,9 +108,11 @@ def create_app(
     # webhook route works in tests without running the lifespan.
     app.state.router = EventRouter()
 
-    from whatsapp_agent.api.routes import admin, health, webhooks
+    from whatsapp_agent.api.routes import admin, calls, config, health, webhooks
 
     app.include_router(webhooks.router)
     app.include_router(health.router)
     app.include_router(admin.router)
+    app.include_router(config.router)
+    app.include_router(calls.router)
     return app

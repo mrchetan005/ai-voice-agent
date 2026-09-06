@@ -54,6 +54,7 @@ from whatsapp_agent.channels.transport import WhatsAppCallTransport
 from whatsapp_agent.config import get_settings
 from whatsapp_agent.infra.metering import UsageMeter, record_session
 from whatsapp_agent.infra.redis import RedisGateway
+from whatsapp_agent.infra.runtime_config import RuntimeConfig
 from whatsapp_agent.infra.stores import SessionStore, TranscriptStore
 
 logger = logging.getLogger("whatsapp_agent")
@@ -93,20 +94,19 @@ def _resolve_brain(provider: str, requested: str) -> str:
     return requested
 
 
-def _split_provider_options() -> dict:
-    """Split-stack knobs from settings. ASR defaults to Deepgram nova-3
-    MULTILINGUAL — callers here code-switch between English and Indian
-    languages mid-sentence."""
-    settings = get_settings()
+async def _split_provider_options(config: RuntimeConfig) -> dict:
+    """Split-stack knobs, resolved runtime-config-first (env fallback).
+    ASR defaults to Deepgram nova-3 MULTILINGUAL — callers here code-switch
+    between English and Indian languages mid-sentence."""
     opts: dict = {
-        "asr": settings.split_asr,
-        "tts": settings.split_tts,
-        "asr_language": settings.split_asr_language,
+        "asr": await config.resolve("split_asr"),
+        "tts": await config.resolve("split_tts"),
+        "asr_language": await config.resolve("split_asr_language"),
     }
-    if settings.split_asr_model:
-        opts["asr_model"] = settings.split_asr_model
-    if settings.split_tts_model:
-        opts["tts_model"] = settings.split_tts_model
+    if asr_model := await config.resolve("split_asr_model"):
+        opts["asr_model"] = asr_model
+    if tts_model := await config.resolve("split_tts_model"):
+        opts["tts_model"] = tts_model
     return opts
 
 
@@ -228,10 +228,11 @@ async def _send_recap(
     turns: list[tuple[str, str]],
     service: BookingService | None,
     meter: UsageMeter | None = None,
+    enabled: bool = True,
 ) -> None:
     """Post-call recap on WhatsApp. Best-effort with a hard time cap —
     a failed or slow recap must never block teardown."""
-    if not turns or service is None or not get_settings().recap_enabled:
+    if not turns or service is None or not enabled:
         return
     with contextlib.suppress(Exception):
         upcoming = await service.booking_store.list_upcoming(recipient)
@@ -251,6 +252,7 @@ class CallManager:
         cal: CalClient,
         session_store: SessionStore,
         redis: RedisGateway | None = None,
+        config: RuntimeConfig | None = None,
     ) -> None:
         self.router = router
         self.wa = wa
@@ -258,13 +260,19 @@ class CallManager:
         self.session_store = session_store
         # Disabled gateway when Redis is off — every op fail-open, no None checks.
         self.redis = redis or RedisGateway(None)
+        # Unconnected store resolves straight to Settings — same trick.
+        self.config = config or RuntimeConfig("")
         # v1 policy: one active call at a time (see module docstring).
         self._call_lock = asyncio.Lock()
         self._inbound_task: asyncio.Task | None = None
+        # API-started calls run as background tasks; the pending flag closes
+        # the gap between start_outbound returning and the task taking the lock.
+        self._outbound_pending = False
+        self._bg_tasks: set[asyncio.Task] = set()
 
     @property
     def call_active(self) -> bool:
-        return self._call_lock.locked()
+        return self._call_lock.locked() or self._outbound_pending
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -284,6 +292,10 @@ class CallManager:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._inbound_task
             self._inbound_task = None
+        if self._bg_tasks:
+            # Let an active API call finish; the lifespan's shutdown-grace
+            # timeout bounds this wait (and cancels the calls on expiry).
+            await asyncio.gather(*self._bg_tasks, return_exceptions=True)
 
     # -- inbound ---------------------------------------------------------------
 
@@ -307,21 +319,59 @@ class CallManager:
 
     # -- outbound ---------------------------------------------------------------
 
+    def start_outbound(
+        self,
+        *,
+        peer: str | None = None,
+        provider: str | None = None,
+        brain: str | None = None,
+        voice: str | None = None,
+        skip_permission: bool = False,
+    ) -> str:
+        """API entry (POST /calls): begin the call in the background and
+        return its ref immediately. Raises CallBusy when one is active."""
+        if self.call_active:
+            raise CallBusy(peer or "")
+        call_ref = uuid.uuid4().hex[:12]
+        self._outbound_pending = True
+
+        async def _run() -> None:
+            try:
+                await self.run_outbound(
+                    peer=peer, provider=provider, brain=brain, voice=voice,
+                    skip_permission=skip_permission, call_ref=call_ref,
+                )
+            except CallBusy:
+                logger.warning("call %s dropped: another call won the race", call_ref)
+            except Exception:
+                logger.exception("API call %s failed", call_ref)
+            finally:
+                self._outbound_pending = False
+
+        task = asyncio.create_task(_run(), name=f"call-{call_ref}")
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return call_ref
+
     async def run_outbound(
         self,
         *,
         peer: str | None = None,
-        provider: str = "gemini-live",
-        brain: str = "single",
+        provider: str | None = None,
+        brain: str | None = None,
         voice: str | None = None,
         skip_permission: bool = False,
         permission_only: bool = False,
         call_ref: str = "",
     ) -> int:
         """Permission flow + one outbound call run. Raises CallBusy if a
-        call is already active."""
+        call is already active. None engine fields resolve through runtime
+        config, then Settings."""
         settings = get_settings()
         peer = (peer or settings.whatsapp_recipient).lstrip("+")
+        provider = await self.config.resolve("provider", provider)
+        brain = await self.config.resolve("brain", brain)
+        voice = await self.config.resolve("voice", voice)
         if self._call_lock.locked():
             raise CallBusy(peer)
         async with self._call_lock:
@@ -400,6 +450,7 @@ class CallManager:
                 booking_agent = BookingAgent(
                     self.cal, event_type_id, self.wa, spec.peer, service,
                     timezone=timezone, business_name=business,
+                    model=await self.config.resolve("scheduler_model"),
                     profile_note=render_profile_block(service.profile),
                     redis=self.redis,
                 )
@@ -420,7 +471,7 @@ class CallManager:
                 await transport.place_call()
 
             if spec.provider == "split":
-                provider_options.update(_split_provider_options())
+                provider_options.update(await _split_provider_options(self.config))
             config = SessionConfig(
                 language=settings.voiceagent_language,
                 tone="warm",
@@ -480,7 +531,10 @@ class CallManager:
                 else call.session_turns if call is not None
                 else []
             )
-            await _send_recap(self.wa, spec.peer, business, turns, service, meter)
+            await _send_recap(
+                self.wa, spec.peer, business, turns, service, meter,
+                enabled=await self.config.resolve("recap_enabled"),
+            )
             if spec.provider == "openai-realtime":
                 meter.merge_openai_realtime(proxy.usage)
             elif spec.provider == "split":

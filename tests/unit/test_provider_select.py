@@ -7,6 +7,7 @@ Run:  uv run tests/test_provider_select.py
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 
@@ -24,8 +25,14 @@ from whatsapp_agent.channels.call_manager import (
     _split_provider_options,
 )
 from whatsapp_agent.infra.metering import UsageMeter
+from whatsapp_agent.infra.runtime_config import RuntimeConfig
 
 ROHAN = "4877b818-c7fe-4c89-b1cf-eadf8e23da72"
+
+
+def _split_opts() -> dict:
+    """Unconnected RuntimeConfig resolves straight from env settings."""
+    return asyncio.run(_split_provider_options(RuntimeConfig("")))
 
 
 class DummyTransport:
@@ -72,13 +79,13 @@ def main() -> int:
     # -- split env knobs -----------------------------------------------------------
     for key in ("SPLIT_ASR", "SPLIT_ASR_LANGUAGE", "SPLIT_ASR_MODEL", "SPLIT_TTS"):
         os.environ.pop(key, None)
-    opts = _split_provider_options()
+    opts = _split_opts()
     check("split defaults: deepgram + cartesia + MULTILINGUAL",
           opts == {"asr": "deepgram", "tts": "cartesia", "asr_language": "multi"})
     os.environ["SPLIT_ASR"] = "deepgram-flux"
     os.environ["SPLIT_ASR_MODEL"] = "flux-general-multi"
     try:
-        opts = _split_provider_options()
+        opts = _split_opts()
         check("split env overrides applied",
               opts["asr"] == "deepgram-flux" and opts["asr_model"] == "flux-general-multi")
     finally:

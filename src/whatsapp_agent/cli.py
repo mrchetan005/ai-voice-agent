@@ -110,10 +110,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_port(p_call)
     p_call.add_argument("--to", default=None, help="callee (default: WHATSAPP_RECIPIENT)")
     p_call.add_argument(
-        "--provider", choices=PROVIDERS, default="gemini-live",
-        help="voice engine: gemini-live (default; supports single brain), "
-             "openai-realtime, or split (Deepgram STT + Cartesia TTS; "
-             "SPLIT_* settings; both force dual brain)",
+        "--provider", choices=PROVIDERS, default=None,
+        help="voice engine: gemini-live (supports single brain), "
+             "openai-realtime, or split (Deepgram STT + Cartesia TTS; both "
+             "force dual brain). Default: runtime config, then DEFAULT_PROVIDER",
     )
     p_call.add_argument(
         "--voice", default=None,
@@ -121,10 +121,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "prebuilt name, or an OpenAI voice",
     )
     p_call.add_argument(
-        "--brain", choices=("single", "dual"), default="single",
+        "--brain", choices=("single", "dual"), default=None,
         help="single: Gemini Live calls tools directly (lowest latency; "
              "gemini-live only); dual: LangGraph agent behind the voice "
-             "engine (SCHEDULER_MODEL picks its LLM)",
+             "engine (SCHEDULER_MODEL picks its LLM). Default: runtime "
+             "config, then DEFAULT_BRAIN",
     )
     p_call.add_argument("--skip-permission", action="store_true",
                         help="permission already granted in the last 7 days")
