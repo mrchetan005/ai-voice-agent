@@ -1,0 +1,52 @@
+# Production stack: app + Redis + Caddy (automatic HTTPS).
+#
+#   1. Point your domain's A record at this box; open 80/443 inbound.
+#      WebRTC media also needs OUTBOUND UDP allowed (default on most VPSes).
+#   2. cp .env.example .env  and fill it (set WHATSAPP_APP_SECRET!).
+#   3. DOMAIN=agent.example.com docker compose up -d --build
+#   4. Meta webhook URL: https://agent.example.com/webhook
+#
+# Dev without a domain: skip caddy (`docker compose up app redis`) and use
+# ngrok toward :8080 — ngrok is for development ONLY, never production.
+
+services:
+  app:
+    build: .
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8080:8080"        # direct access for dev/ngrok; Caddy proxies internally
+    depends_on:
+      - redis
+    # Room for the shutdown grace: an active call gets to finish its recap
+    # and session record before SIGKILL.
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  caddy-data:
+  caddy-config:

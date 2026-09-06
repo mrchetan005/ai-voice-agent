@@ -19,10 +19,11 @@ VoiceAgent(provider="deepgram+groq+cartesia", agent=my_agent,
            language="hi-IN", tone="warm").run("ws://0.0.0.0:8765")
 ```
 
-The repo also ships a production application built on the library:
-an appointment-booking agent that runs real WhatsApp voice calls
-(inbound and outbound) and text chats, and books into Cal.com. See
-[Appointment booker](#appointment-booker) below.
+The repo also ships a production application built on the library: a
+WhatsApp assistant that handles text chats and real voice calls (inbound
+and outbound) for people who'd rather talk than type. Appointment booking
+into Cal.com is its first capability; more capabilities plug in as sibling
+packages. See [WhatsApp agent](#whatsapp-agent) below.
 
 ## Requirements
 
@@ -93,68 +94,110 @@ Session defaults can also come from env (`VOICEAGENT_LANGUAGE`,
 Copy `.env.example` to `.env` and fill in what you use; `.env` is gitignored
 and must never be committed.
 
-## Appointment booker
+## WhatsApp agent
 
-`src/appointment_booker/` — a scheduling agent ("Priya") on top of the
-library. It calls users on WhatsApp (or answers their calls), holds a
-natural conversation in English/Hindi/Hinglish and other Indian languages,
-books the agreed slot in Cal.com, and sends the confirmation as a WhatsApp
-message. Text chat works too, and both channels share one conversation
-history per caller, persisted in Postgres.
+`src/whatsapp_agent/` — a general WhatsApp assistant ("Priya") on top of the
+library, running as ONE FastAPI service: Meta webhooks, inbound call
+answering, outbound calls, text chat, and an admin API. It holds a natural
+conversation in English/Hindi/Hinglish and other Indian languages over chat
+or voice — voice exists for people who don't want to (or can't) type.
+
+**Appointment booking is the first capability, not the only one.** Booking
+lives in `capabilities/booking/`; a new capability (orders, support, FAQ…)
+is a sibling package that contributes LangGraph tools to the brain and
+native declarations to the voice tool set — two registration points, no
+plugin framework.
 
 Moving parts:
 
-- Meta WhatsApp Business Calling API for call signalling, aiortc for the
-  WebRTC media leg
-- Gemini Live as voice and brain in one (`--brain single`, default, lowest
-  latency); optional `--brain dual` mode routes replies through a
-  checkpointed LangGraph agent instead
+- Meta WhatsApp Business Calling API for signalling, aiortc for the WebRTC
+  media leg, X-Hub-Signature-256 validation on every webhook
+- Gemini Live as voice+brain in one (`single` brain, lowest latency), or any
+  engine (`openai-realtime`, `split` = Deepgram + Cartesia) in `dual` mode
+  behind the checkpointed LangGraph agent (LLM swappable via
+  `SCHEDULER_MODEL`: gemini / groq / openai / openrouter BYOK / LiteLLM)
 - Cal.com v2 API for availability and bookings
-- Postgres (Neon) for transcripts and cross-channel memory — written
-  asynchronously, never blocking the audio path
+- Postgres (Neon) for transcripts, profiles, bookings, session records —
+  written asynchronously, never blocking the audio path
+- Redis for webhook dedup, per-phone rate limits, slots/profile caches and
+  call locks — every operation fail-open: Redis down never breaks a call
 
 ### Setup
 
-1. Meta app with WhatsApp Business Calling enabled; note the phone number ID
-   and access token.
-2. Expose the webhook port publicly (`ngrok http 8080` during development)
-   and register the URL + `WHATSAPP_VERIFY_TOKEN` in the Meta App dashboard,
-   subscribed to both `calls` and `messages` fields.
+1. Meta app with WhatsApp Business Calling enabled; note the phone number
+   ID, access token and **app secret** (`WHATSAPP_APP_SECRET`).
+2. A public HTTPS URL to port 8080 — `ngrok http 8080` in development,
+   Caddy + your domain in production — registered in the Meta App dashboard
+   with `WHATSAPP_VERIFY_TOKEN`, subscribed to `calls` and `messages`.
 3. Cal.com API key and an event type ID
-   (`uv run --env-file .env python -m appointment_booker.cal_client` lists
-   yours).
-4. Postgres connection string in `DATABASE_URL` (optional — without it the
-   agent runs memory-only and warns).
+   (`uv run --env-file .env python -m whatsapp_agent.capabilities.booking.cal_client`
+   lists yours).
+4. Postgres in `DATABASE_URL` and Redis in `REDIS_URL` (both optional — the
+   agent degrades gracefully and warns).
 5. Fill the rest of `.env` from `.env.example`.
 
-### Run
+### Run (development)
 
 ```sh
-uv run --env-file .env appointment-booker            # outbound: call the user
-uv run --env-file .env appointment-booker --inbound  # answer calls to the business number
-uv run --env-file .env appointment-booker --chat     # book over WhatsApp text
+uv run --env-file .env whatsapp-agent serve     # everything: webhooks + calls + chat
+uv run --env-file .env whatsapp-agent call      # place one outbound test call
+uv run --env-file .env whatsapp-agent call --provider split --voice kavita --brain dual
+uv run --env-file .env whatsapp-agent inbound   # answer calls only
+uv run --env-file .env whatsapp-agent chat      # text chat only
+uv run --env-file .env whatsapp-agent audit     # sampled hallucination audit
 ```
 
-Useful flags: `--brain single|dual`, `--skip-permission` (reuse a call
-permission granted in the last 7 days), `--serve-only` (webhook server only),
-`--port` (default 8080). Outbound calls first send a call-permission request
-the user must accept — that is Meta policy, not this app.
+Outbound calls first send a call-permission request the user must accept
+(Meta policy); `--skip-permission` reuses a grant from the last 7 days.
+Chat sessions never self-exit — a background sweep flushes sessions idle
+for 30+ minutes into the session store.
 
-### Docker
+### HTTP API
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `GET/POST /webhook` | Meta signature | webhook verify + signed event intake |
+| `GET /health` | none | `{status, redis, db, active_call, version}` |
+| `GET /config` | bearer | every runtime key with `{value, source}` |
+| `POST /config` | bearer | change engine settings live, e.g. `{"provider": "split", "voice": "kavita"}`; `null` clears an override |
+| `POST /calls` | bearer | start an outbound call: 202 `{call_ref}`, `Idempotency-Key` replay 200, 409 when busy |
+| `GET /report` | bearer | health/latency/outcomes/audit rollup (`?days=7`) |
+| `GET /costs` | bearer | per-session and per-provider spend for the consumer agent |
+
+Bearer = `ADMIN_TOKEN` (falls back to `METRICS_TOKEN`); with no token
+configured these endpoints answer 404. Precedence for every engine setting:
+request/CLI > runtime config (`POST /config`) > env. Example — switch the
+next call to the split stack without touching `.env`:
 
 ```sh
-docker build -t appointment-booker .
-docker run --env-file .env -p 8080:8080 appointment-booker --inbound
+curl -X POST https://$DOMAIN/config -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -d '{"provider": "split", "brain": "dual", "voice": "rohan"}'
+curl -X POST https://$DOMAIN/calls -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -H "Idempotency-Key: crm-42" -d '{"to": "91XXXXXXXXXX"}'
 ```
 
-Secrets are passed at runtime via `--env-file`; nothing is baked into the
-image.
+### Deploy (production)
+
+The stack needs a VPS/VM with Docker — WebRTC media requires outbound UDP
+and one long-lived process, so serverless platforms (Cloud Run, Lambda)
+are unsuitable. Open 80/443 inbound; point your domain at the box.
+
+```sh
+cp .env.example .env            # fill it; set WHATSAPP_APP_SECRET
+DOMAIN=agent.example.com docker compose up -d --build
+```
+
+That starts the app, Redis, and Caddy with automatic HTTPS; the Meta
+webhook URL becomes `https://agent.example.com/webhook`. The app runs
+exactly ONE uvicorn worker by design (in-process media and queues) —
+scale later means Redis pub/sub between processes, not `--workers 2`.
+ngrok is for local development only.
 
 ## Development
 
 ```sh
-uv run tests/test_ws_e2e.py                        # WebSocket end-to-end (mock engine)
-uv run --env-file .env tests/test_gemini_live.py   # live Gemini session (needs GOOGLE_API_KEY)
+uv run pytest                                      # offline suite (no keys, no network)
+uv run --env-file .env pytest -m live              # live tests (real APIs/DB; costs money)
 uv run python -m voiceagent.guardrails_and_eval    # eval harness
 uvx ruff check src tests examples                  # lint (config in pyproject.toml)
 ```
@@ -162,20 +205,21 @@ uvx ruff check src tests examples                  # lint (config in pyproject.t
 ## Project layout
 
 ```
-src/voiceagent/                  the library
+src/voiceagent/                  the library (public API frozen)
   models.py                      pydantic schemas: session config, pulses, approvals
   base.py                        transports, bounded queues, phrase cache, base proxy
-  providers.py                   OpenAI Realtime / Gemini Live / split-stack / mock
+  providers/                     openai_realtime / gemini_live / split_stack / asr / tts / llm / mock
   commentary_and_approval.py     live commentary, approval gateway, agent bridge
-  guardrails_and_eval.py         injection/PII guardrails, telemetry, eval harness
+  telemetry.py, guardrails.py, eval_harness.py
   adapters.py                    LangChain / CrewAI / WebSocket / HTTP adapters
-src/appointment_booker/          the WhatsApp booking application
-  main.py                        entry point and call/chat orchestration
-  prompts.py                     every conversation prompt, in one place
-  graph.py                       LangGraph booking agent (chat + dual-brain voice)
-  native_tools.py                Gemini-native tools, transcript store, chat<->call bridge
-  transport_whatsapp.py          aiortc WebRTC transport for Meta calling
-  webhooks.py                    Meta webhook receiver (calls + messages)
-  whatsapp_api.py                WhatsApp Cloud API client
-  cal_client.py                  Cal.com v2 client
+src/whatsapp_agent/              the WhatsApp assistant application
+  cli.py                         serve / call / inbound / chat / audit
+  config.py                      pydantic-settings: every env var, one class
+  api/                           FastAPI factory + routes (webhooks, health, admin, config, calls)
+  channels/                      Meta plumbing: events/router, WhatsApp client,
+                                 WebRTC transport, call + chat managers
+  agent/                         LangGraph brain, prompts, recap, audit
+  capabilities/booking/          FIRST capability: booking service, voice tools, Cal.com client
+  infra/                         stores (Postgres), redis gateway, runtime config,
+                                 pricing, metering
 ```

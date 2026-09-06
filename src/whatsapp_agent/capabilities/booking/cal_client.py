@@ -108,7 +108,7 @@ class CalClient:
                 "eventTypeId": event_type_id,
                 "start": start_utc_iso,  # must be UTC ISO 8601
                 "attendee": attendee,
-                "metadata": metadata or {"source": "voiceagent-appointment-booker"},
+                "metadata": metadata or {"source": "voiceagent-whatsapp-agent"},
             },
             headers=self._headers(V_BOOKINGS),
         )

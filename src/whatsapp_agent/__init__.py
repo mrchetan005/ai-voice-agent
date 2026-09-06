@@ -1,7 +1,7 @@
-"""WhatsApp agent: a general WhatsApp assistant (chat + voice calls) built on the voiceagent library. Appointment booking is its first capability."""
-"""Appointment-booking voice+chat agent on WhatsApp (Cal.com + Gemini Live).
+"""WhatsApp agent: a general WhatsApp assistant (chat + voice calls) built
+on the voiceagent library. Appointment booking is its first capability;
+new capabilities are sibling packages under capabilities/.
 
-Built on the `voiceagent` library. Entry point: `appointment-booker` CLI
-(see main.py) with modes: outbound call (default), --inbound, --chat,
---serve-only, --permission-only.
+Entry points: the `whatsapp-agent` CLI (serve/call/inbound/chat/audit) and
+the FastAPI factory `whatsapp_agent.api.app:create_app`.
 """

@@ -1,0 +1,5 @@
+# Automatic HTTPS for the WhatsApp agent. DOMAIN comes from the compose
+# environment; certificates are provisioned and renewed by Caddy itself.
+{$DOMAIN} {
+	reverse_proxy app:8080
+}

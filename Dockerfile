@@ -28,11 +28,12 @@ ENV PATH="/app/.venv/bin:$PATH" \
 USER app
 EXPOSE 8080
 
-# Webhook server answers (403 on bad token still proves liveness).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s CMD \
-    python -c "import urllib.request,urllib.error,sys;\
-exec('try: urllib.request.urlopen(\"http://127.0.0.1:8080/webhook\", timeout=3)\nexcept urllib.error.HTTPError: pass\nexcept Exception: sys.exit(1)')"
+    python -c "import urllib.request,sys; \
+sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).status == 200 else 1)"
 
 # Config via env (.env is NOT baked in — pass with --env-file at run time).
-ENTRYPOINT ["whatsapp-agent"]
-CMD ["--inbound"]
+# ONE worker, always: the WebRTC media legs and event queues live in this
+# process — more workers would split them. Scale = Redis pub/sub, not workers.
+CMD ["uvicorn", "whatsapp_agent.api.app:create_app", "--factory", \
+     "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]

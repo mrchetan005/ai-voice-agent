@@ -170,7 +170,7 @@ async def _self_check() -> int:
 
     wa = WhatsAppClient()
     to = get_settings().whatsapp_recipient
-    result = await wa.send_text(to, "voiceagent appointment-booker: connectivity check ✅")
+    result = await wa.send_text(to, "voiceagent whatsapp-agent: connectivity check ✅")
     print(f"[ok] text sent to {to}: {result.get('messages', [{}])[0].get('id', '?')}")
     try:
         settings = await wa.get_settings()
