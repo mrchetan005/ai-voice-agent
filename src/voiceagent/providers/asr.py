@@ -16,6 +16,31 @@ from ._common import _require_env
 logger = logging.getLogger("voiceagent")
 
 
+async def _open_deepgram_ws(url: str) -> Any:
+    """Open a Deepgram streaming socket with a generous handshake timeout
+    and one retry.
+
+    The handshake shares the event loop with the rest of call setup (aioice
+    ICE, the ~7 s dual-brain greet). The websockets default open_timeout
+    (~10 s) is too tight when the loop is briefly contended at session
+    start — it surfaced as ``TimeoutError: timed out during opening
+    handshake`` even though the raw socket opens in well under a second."""
+    headers = {"Authorization": f"Token {_require_env('DEEPGRAM_API_KEY')}"}
+    last: Exception | None = None
+    for attempt in (1, 2):
+        try:
+            return await websockets.connect(
+                url, additional_headers=headers, open_timeout=20
+            )
+        except Exception as exc:  # retried below, then re-raised
+            last = exc
+            logger.warning(
+                "Deepgram ASR connect attempt %d/2 failed: %r", attempt, exc
+            )
+            if attempt == 1:
+                await asyncio.sleep(0.5)
+    raise last  # type: ignore[misc]
+
 
 # ---------------------------------------------------------------------------
 # Split stack: Deepgram ASR
@@ -48,10 +73,7 @@ class DeepgramClassicASR:
         self.audio_seconds_sent: float = 0.0
 
     async def connect(self) -> None:
-        self._ws = await websockets.connect(
-            self._url,
-            additional_headers={"Authorization": f"Token {_require_env('DEEPGRAM_API_KEY')}"},
-        )
+        self._ws = await _open_deepgram_ws(self._url)
         # Deepgram closes idle sockets (~10 s, NET-0001); KeepAlive every 5 s
         # is harmless during active audio and mandatory during user silence.
         self._keepalive = asyncio.create_task(self._keepalive_loop())
@@ -129,10 +151,7 @@ class DeepgramFluxASR:
         self.audio_seconds_sent: float = 0.0
 
     async def connect(self) -> None:
-        self._ws = await websockets.connect(
-            self._url,
-            additional_headers={"Authorization": f"Token {_require_env('DEEPGRAM_API_KEY')}"},
-        )
+        self._ws = await _open_deepgram_ws(self._url)
 
     async def send_audio(self, pcm: bytes) -> None:
         self.audio_seconds_sent += len(pcm) / (self._sample_rate * 2)

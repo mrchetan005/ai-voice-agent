@@ -350,6 +350,9 @@ class BaseVoiceAgentProxy(ABC):
         # instead of triggering a normal agent turn.
         self._listen_waiter: asyncio.Future[str] | None = None
         self._stopping = asyncio.Event()
+        # Set once _connect() finishes; callers hold back a heavy first turn
+        # (the dual-brain greet) until the provider sockets are up.
+        self._connected = asyncio.Event()
 
     # -- wiring ------------------------------------------------------------
 
@@ -373,6 +376,7 @@ class BaseVoiceAgentProxy(ABC):
         provider socket after the client disconnected).
         """
         await self._connect()
+        self._connected.set()
         self.set_state(SessionState.LISTENING)
         loops = [
             asyncio.create_task(self._uplink_loop(), name="uplink"),
@@ -397,6 +401,47 @@ class BaseVoiceAgentProxy(ABC):
     async def stop(self) -> None:
         self._stopping.set()
         put_drop_oldest(self._audio_out, END_OF_STREAM)
+
+    async def wait_connected(self, timeout_s: float = 15.0) -> bool:
+        """Block until ``_connect()`` has finished (provider sockets up).
+
+        The caller uses this to hold back a heavy first turn — the dual-brain
+        greet is a ~7 s LangGraph run — until the ASR/TTS handshakes are done.
+        Running both at once starved the loop and timed out Deepgram's opening
+        handshake. Returns False on timeout (proceed anyway; fail-open)."""
+        try:
+            await asyncio.wait_for(self._connected.wait(), timeout=timeout_s)
+            return True
+        except TimeoutError:
+            return False
+
+    async def wait_until_drained(
+        self,
+        *,
+        start_timeout_s: float = 5.0,
+        max_wait_s: float = 25.0,
+        tail_s: float = 1.0,
+    ) -> None:
+        """Block until queued playback has been flushed to the transport.
+
+        Called before a hangup so a closing line (goodbye / sign-off) is heard
+        in full. Phase 1 waits for playback to BEGIN — a hangup is often asked
+        for mid-turn, before the line is even synthesized. Phase 2 waits for
+        the audio-out queue to drain and speaking to stop. Phase 3 adds a
+        short tail so the last frames reach the peer. Every phase is
+        time-capped so teardown can never hang."""
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + start_timeout_s
+        while loop.time() < deadline:
+            if self.state is SessionState.SPEAKING or self._audio_out.qsize() > 0:
+                break
+            await asyncio.sleep(0.05)
+        deadline = loop.time() + max_wait_s
+        while loop.time() < deadline:
+            if self._audio_out.qsize() == 0 and self.state is not SessionState.SPEAKING:
+                break
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(tail_s)
 
     # -- shared downlink -----------------------------------------------------
 

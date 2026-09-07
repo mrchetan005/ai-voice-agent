@@ -17,6 +17,7 @@ import json
 import logging
 import re
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import httpx
@@ -146,6 +147,7 @@ async def _single_brain_setup(
     timezone: str,
     business: str,
     inbound: bool,
+    end_call_cb: Callable[[], Awaitable[None]],
     redis: RedisGateway | None = None,
 ) -> tuple[str, dict, TranscriptStore, TextBridge, BookingService]:
     """SINGLE-BRAIN session pieces: Gemini Live is the whole agent — persona
@@ -194,22 +196,20 @@ async def _single_brain_setup(
     text_bridge = TextBridge(session, transcript_store)
     service.email_waiter = text_bridge.wait_email
 
-    async def _end_call() -> None:
-        session.ended.set()
-
     provider_options: dict = {
-        "native_tools": build_native_tools(service, end_call_cb=_end_call)
+        "native_tools": build_native_tools(service, end_call_cb=end_call_cb)
     }
 
     # Farewell backstop: the model often says goodbye WITHOUT calling
-    # end_call. If an assistant turn ends in a farewell, hang up ourselves
-    # after a grace window; any further speech cancels the timer.
+    # end_call. If an assistant turn ends in a farewell, give the caller a
+    # short beat to add something (any further speech cancels the timer),
+    # then hand off to the drain-aware hangup so the goodbye isn't clipped.
     pending_end: list[asyncio.Task] = []
 
     async def _delayed_hangup() -> None:
-        await asyncio.sleep(6.0)
+        await asyncio.sleep(2.0)  # a beat in case the caller continues
         logger.info("farewell backstop: hanging up")
-        session.ended.set()
+        await end_call_cb()
 
     async def on_transcription(role: str, text: str) -> None:
         await transcript_store.save(role, text)
@@ -446,12 +446,25 @@ class CallManager:
         text_bridge: TextBridge | None = None
         service: BookingService | None = None
         try:
+            # Drain-aware hangup, shared by both brains: wait for the closing
+            # line's audio to finish playing before tearing down the WebRTC
+            # leg, so a goodbye / sign-off is never clipped. The proxy is
+            # built further down, so it's read through a holder.
+            proxy_holder: list = [None]
+
+            async def _end_call() -> None:
+                proxy = proxy_holder[0]
+                if proxy is not None:
+                    with contextlib.suppress(Exception):
+                        await proxy.wait_until_drained()
+                session.ended.set()
+
             if brain == "single":
                 (system_prompt, provider_options, transcript_store,
                  text_bridge, service) = await _single_brain_setup(
                     self.cal, self.wa, session, spec.peer, event_type_id,
                     timezone, business, inbound=(spec.direction == "inbound"),
-                    redis=self.redis,
+                    end_call_cb=_end_call, redis=self.redis,
                 )
             else:
                 # DUAL-BRAIN: the voice engine relays; LangGraph is the brain.
@@ -460,13 +473,6 @@ class CallManager:
                     self.cal, self.wa, session, spec.peer, event_type_id,
                     timezone, "whatsapp-voice-agent", redis=self.redis,
                 )
-
-                async def _end_call() -> None:
-                    # Grace so the brain's goodbye audio finishes relaying
-                    # before the WebRTC leg tears down.
-                    await asyncio.sleep(3.5)
-                    session.ended.set()
-
                 booking_agent = BookingAgent(
                     self.cal, event_type_id, self.wa, spec.peer, service,
                     timezone=timezone, business_name=business,
@@ -502,6 +508,7 @@ class CallManager:
                 provider_options=provider_options,
             )
             proxy = _build_proxy(spec.provider, config, transport)
+            proxy_holder[0] = proxy
             telemetry = TelemetryRecorder(config.session_id)
             proxy.telemetry = telemetry
 
@@ -536,6 +543,11 @@ class CallManager:
                 await asyncio.sleep(0.7)  # audio path settles after pickup
             else:
                 await asyncio.sleep(1.0)  # audio path settles
+
+            # Let the provider handshakes (ASR/TTS sockets) finish before the
+            # first turn competes for the loop — a contended handshake was
+            # timing out Deepgram's opening handshake at session start.
+            await proxy.wait_connected(timeout_s=15.0)
 
             if call is not None:  # dual-brain: LangGraph writes the greeting
                 await proxy.speak_text(await call.greet())

@@ -68,15 +68,10 @@ def build_native_tools(
     async def end_call(args: dict[str, Any]) -> dict[str, Any]:
         if end_call_cb is None:
             return {"status": "UNSUPPORTED"}
-
-        async def delayed() -> None:
-            # Grace period so the goodbye audio finishes playing before the
-            # WebRTC leg tears down.
-            await asyncio.sleep(3.5)
-            await end_call_cb()
-
-        asyncio.get_running_loop().create_task(delayed())
-        return {"status": "ENDING", "note": "call will end in a few seconds"}
+        # Background so the model still speaks its goodbye this turn; the
+        # callback waits for that audio to drain before tearing down the leg.
+        asyncio.get_running_loop().create_task(end_call_cb())
+        return {"status": "ENDING", "note": "call ends after the goodbye"}
 
     async def get_available_slots(args: dict[str, Any]) -> dict[str, Any]:
         query = SlotQueryArgs.model_validate(args)
@@ -280,10 +275,13 @@ def build_native_tools(
         "end_call": {
             "declaration": {
                 "name": "end_call",
-                "description": "Hang up the phone call. Call this AFTER "
-                               "saying goodbye when the conversation is "
-                               "finished, or immediately when the caller "
-                               "asks you to end or cut the call.",
+                "description": "Hang up the phone call. Call this ONLY after "
+                               "the caller confirmed they need nothing else, "
+                               "together with your sign-off in the SAME turn "
+                               "(the goodbye plays in full first). Do NOT call "
+                               "it right after a booking — first ask if there "
+                               "is anything else. Or call it immediately if "
+                               "the caller asks to end or cut the call.",
                 "parameters": {"type": "OBJECT", "properties": {}},
             },
             "handler": end_call,

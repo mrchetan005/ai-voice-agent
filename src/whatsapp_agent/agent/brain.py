@@ -257,9 +257,12 @@ class BookingAgent:
 
         @tool
         def end_call() -> str:
-            """Hang up the phone call. Call this right after a brief goodbye
-            once everything the caller needed is done, or immediately if the
-            caller asks to end, cut, stop, or hang up the call. Voice only."""
+            """Hang up the phone call. Call this ONLY after the caller has
+            confirmed they need nothing else, together with your sign-off in
+            the SAME reply (the goodbye is played in full before the line
+            drops). Or call it immediately if the caller asks to end, cut,
+            stop, or hang up. Do NOT call it right after a booking — first ask
+            if there's anything else. Voice only."""
             if self._end_call_cb is None:
                 return json.dumps({"status": "UNSUPPORTED"})
             self._ending = True
@@ -525,8 +528,12 @@ class BookingAgent:
             return reply
 
     async def _delayed_end(self) -> None:
+        # Backstop: the brain said goodbye without calling end_call. Give the
+        # caller a short beat to add something (a new turn cancels this at the
+        # top of respond), then hand off to the drain-aware hangup — which
+        # waits for the goodbye audio to finish before tearing down.
         try:
-            await asyncio.sleep(6.0)
+            await asyncio.sleep(2.0)
         except asyncio.CancelledError:
             return
         if self._ending or self._end_call_cb is None:
