@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     admin_token: str = ""             # "" -> falls back to metrics_token
     webhook_rate_per_min: int = 20
     admin_rate_per_min: int = 30
+    max_concurrent_calls: int = 3     # capacity gate for CallManager (0 pauses new calls)
     shutdown_grace_s: float = 15.0
     log_json: bool = False
 

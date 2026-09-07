@@ -3,9 +3,9 @@
 Provider policy lives here: gemini-live is voice+brain (single) or
 voice-only (dual); openai-realtime and split are strict voice front-ends
 with no native booking tools, so they always run dual-brain behind the
-LangGraph agent. v1 serializes calls with one lock — going concurrent
-later means removing the lock, not rearchitecting (sessions are already
-per-call).
+LangGraph agent. Calls run concurrently up to the max_concurrent_calls
+capacity gate (runtime-configurable, live); one call per peer is enforced
+by the per-peer Redis lock plus the router's SessionConflict guard.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ from whatsapp_agent.agent.prompts import (
     DUAL_BRAIN_VOICE_PROMPT,
     INBOUND_PICKUP_NUDGE,
     build_single_brain_prompt,
+    render_brief_block,
     render_profile_block,
 )
 from whatsapp_agent.agent.recap import RecapSender
@@ -51,6 +52,7 @@ from whatsapp_agent.channels.events import (
     CallEvent,
     CallSession,
     EventRouter,
+    SessionConflict,
     TextBridge,
 )
 from whatsapp_agent.channels.transport import WhatsAppCallTransport
@@ -122,6 +124,20 @@ def _build_proxy(provider: str, config: SessionConfig, transport):
 
 
 @dataclass
+class CallBrief:
+    """Why we're calling — carried by API-triggered outbound calls and
+    injected into the agent's context: topic-first opener, slot window,
+    pre-filled attendee details (still confirmed aloud before booking)."""
+
+    topic: str
+    window_start: dt.datetime | None = None  # tz-aware
+    window_end: dt.datetime | None = None
+    attendee_name: str = ""
+    attendee_email: str = ""
+    timezone: str = ""
+
+
+@dataclass
 class CallSpec:
     """Everything one call run needs, resolved before dialing."""
 
@@ -132,10 +148,57 @@ class CallSpec:
     voice: str | None = None
     incoming: CallEvent | None = None  # inbound SDP offer
     call_ref: str = ""
+    brief: CallBrief | None = None
 
 
 class CallBusy(Exception):
-    """Another call is active (per-phone or global serialization)."""
+    """Another call is active for this peer, or the capacity gate is full
+    (message == "at capacity")."""
+
+
+def _apply_brief(service: BookingService, brief: CallBrief | None) -> None:
+    """Session-only seed: brief data behaves like a stored profile (the
+    agent still confirms it aloud); it is persisted only when a booking
+    succeeds, via service.book()'s existing profile upsert — unverified
+    website data must not overwrite the durable profile before that."""
+    if brief is None:
+        return
+    if brief.attendee_email:
+        service.confirmed_email = brief.attendee_email
+    merged = dict(service.profile or {})
+    if brief.attendee_name and not merged.get("name"):
+        merged["name"] = brief.attendee_name
+    if brief.attendee_email and not merged.get("email"):
+        merged["email"] = brief.attendee_email
+    if merged:
+        service.profile = merged
+
+
+def _brief_text(brief: CallBrief | None) -> str:
+    """Render the CALL BRIEF prompt block (empty string when no brief)."""
+    from zoneinfo import ZoneInfo
+
+    if brief is None or not brief.topic:
+        return ""
+    window = ""
+    if brief.window_start and brief.window_end:
+        start, end = brief.window_start, brief.window_end
+        if brief.timezone:
+            tz = ZoneInfo(brief.timezone)
+            start, end = start.astimezone(tz), end.astimezone(tz)
+        end_text = (
+            end.strftime("%H:%M") if start.date() == end.date()
+            else end.strftime("%A %d %B %H:%M")
+        )
+        window = f"{start.strftime('%A %d %B %H:%M')} to {end_text}"
+        if brief.timezone:
+            window += f" ({brief.timezone})"
+    return render_brief_block(
+        topic=brief.topic,
+        attendee_name=brief.attendee_name,
+        window=window,
+        email=brief.attendee_email,
+    )
 
 
 async def _single_brain_setup(
@@ -149,6 +212,7 @@ async def _single_brain_setup(
     inbound: bool,
     end_call_cb: Callable[[], Awaitable[None]],
     redis: RedisGateway | None = None,
+    brief: CallBrief | None = None,
 ) -> tuple[str, dict, TranscriptStore, TextBridge, BookingService]:
     """SINGLE-BRAIN session pieces: Gemini Live is the whole agent — persona
     + availability snapshot in its system instruction, Cal.com/WhatsApp tools
@@ -158,10 +222,18 @@ async def _single_brain_setup(
     from zoneinfo import ZoneInfo
 
     today = datetime.now(ZoneInfo(timezone)).date()  # business-local, not server-local
+    start_day, end_day = today + timedelta(days=1), today + timedelta(days=7)
+    if brief is not None and brief.window_start and brief.window_end:
+        # Snapshot follows the requested window (clamped: no past days,
+        # max two weeks out — huge ranges bloat the prompt).
+        tz = ZoneInfo(timezone)
+        start_day = max(brief.window_start.astimezone(tz).date(), today)
+        end_day = min(
+            max(brief.window_end.astimezone(tz).date(), start_day),
+            today + timedelta(days=14),
+        )
     slots = await get_slots_cached(
-        cal, event_type_id,
-        today + timedelta(days=1), today + timedelta(days=7),
-        timezone, redis=redis,
+        cal, event_type_id, start_day, end_day, timezone, redis=redis,
     )
     # Weekday names inline: the model mislabeled dates ("Saturday, August
     # twenty eighth" for a Friday) when given bare ISO dates.
@@ -179,6 +251,7 @@ async def _single_brain_setup(
         cal, wa, session, caller, event_type_id, timezone, "voice-single-brain",
         redis=redis,
     )
+    _apply_brief(service, brief)
 
     # Cross-channel context: previous calls AND chats with this number.
     history = await transcript_store.load_recent(30)
@@ -189,6 +262,7 @@ async def _single_brain_setup(
         inbound=inbound,
         history="\n".join(f"{role}: {content[:150]}" for role, content in history),
         profile=render_profile_block(service.profile),
+        brief=_brief_text(brief),
     )
 
     # Chat<->call sync: texts sent DURING the call are injected into the
@@ -264,17 +338,48 @@ class CallManager:
         self.redis = redis or RedisGateway(None)
         # Unconnected store resolves straight to Settings — same trick.
         self.config = config or RuntimeConfig("")
-        # v1 policy: one active call at a time (see module docstring).
-        self._call_lock = asyncio.Lock()
+        # Capacity gate: refs of running/reserved calls. A plain set +
+        # len() check — never queues, never waits in-process; the limit is
+        # re-read from runtime config at every call start so it's
+        # switchable live via POST /config.
+        self._active: set[str] = set()
         self._inbound_task: asyncio.Task | None = None
-        # API-started calls run as background tasks; the pending flag closes
-        # the gap between start_outbound returning and the task taking the lock.
-        self._outbound_pending = False
         self._bg_tasks: set[asyncio.Task] = set()
+
+    _STATUS_TTL_S = 86_400
 
     @property
     def call_active(self) -> bool:
-        return self._call_lock.locked() or self._outbound_pending
+        return bool(self._active)
+
+    @property
+    def active_call_count(self) -> int:
+        return len(self._active)
+
+    async def _reserve_slot(self, call_ref: str) -> None:
+        limit = int(await self.config.resolve("max_concurrent_calls"))
+        if len(self._active) >= limit:
+            raise CallBusy("at capacity")
+        self._active.add(call_ref)  # no await between check and add -> atomic
+
+    async def _set_status(
+        self, call_ref: str, status: str, peer: str = "", reason: str = ""
+    ) -> None:
+        """Fail-open Redis breadcrumb behind GET /calls/{ref}. Only calls
+        that carry a ref (API-started) are tracked."""
+        if not call_ref:
+            return
+        payload: dict = {
+            "call_ref": call_ref,
+            "status": status,
+            "peer": peer,
+            "updated_at": dt.datetime.now(dt.UTC).isoformat(),
+        }
+        if reason:
+            payload["reason"] = reason
+        await self.redis.set_json(
+            f"call:status:{call_ref}", payload, ttl_s=self._STATUS_TTL_S
+        )
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -302,26 +407,54 @@ class CallManager:
     # -- inbound ---------------------------------------------------------------
 
     async def _inbound_loop(self) -> None:
-        """Wait for users to CALL the business number, pick up, run, repeat.
-        Inbound stays gemini-live single-brain (native tools)."""
+        """Wait for users to CALL the business number and pick up — one task
+        per call, capacity-gated. Inbound stays gemini-live single-brain."""
         while True:
             incoming = await self.router.incoming_calls.get()
             caller = incoming.from_number or get_settings().whatsapp_recipient
             logger.info("incoming call from %s", caller)
-            async with self._call_lock:
+            call_ref = uuid.uuid4().hex[:12]
+            try:
+                await self._reserve_slot(call_ref)
                 session = self.router.open_call(caller, "inbound")
-                spec = CallSpec(peer=caller, direction="inbound", incoming=incoming)
-                try:
-                    await self._run_call(spec, session)
-                except Exception:
-                    logger.exception("inbound call failed")
-                finally:
-                    self.router.close_call(session)
-            logger.info("call ended; waiting for the next one")
+            except (CallBusy, SessionConflict) as exc:
+                self._active.discard(call_ref)
+                logger.warning("refusing inbound from %s: %s", caller, exc)
+                if incoming.call_id:
+                    # There is no reject API; terminating the ringing leg is
+                    # the polite refusal. On failure it just rings out.
+                    with contextlib.suppress(Exception):
+                        await self.wa.terminate_call(incoming.call_id)
+                continue
+            task = asyncio.create_task(
+                self._run_inbound(incoming, caller, session, call_ref),
+                name=f"call-in-{call_ref}",
+            )
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
+
+    async def _run_inbound(
+        self,
+        incoming: CallEvent,
+        caller: str,
+        session: CallSession,
+        call_ref: str,
+    ) -> None:
+        spec = CallSpec(
+            peer=caller, direction="inbound", incoming=incoming, call_ref=call_ref
+        )
+        try:
+            await self._run_call(spec, session)
+        except Exception:
+            logger.exception("inbound call failed")
+        finally:
+            self.router.close_call(session)
+            self._active.discard(call_ref)
+            logger.info("inbound call from %s ended", caller)
 
     # -- outbound ---------------------------------------------------------------
 
-    def start_outbound(
+    async def start_outbound(
         self,
         *,
         peer: str | None = None,
@@ -329,26 +462,33 @@ class CallManager:
         brain: str | None = None,
         voice: str | None = None,
         skip_permission: bool = False,
+        brief: CallBrief | None = None,
     ) -> str:
         """API entry (POST /calls): begin the call in the background and
-        return its ref immediately. Raises CallBusy when one is active."""
-        if self.call_active:
-            raise CallBusy(peer or "")
+        return its ref immediately. Raises CallBusy at capacity."""
         call_ref = uuid.uuid4().hex[:12]
-        self._outbound_pending = True
+        await self._reserve_slot(call_ref)
+        await self._set_status(call_ref, "accepted", peer or "")
 
         async def _run() -> None:
             try:
-                await self.run_outbound(
+                rc = await self.run_outbound(
                     peer=peer, provider=provider, brain=brain, voice=voice,
                     skip_permission=skip_permission, call_ref=call_ref,
+                    brief=brief,
                 )
-            except CallBusy:
-                logger.warning("call %s dropped: another call won the race", call_ref)
+                # Non-zero paths write their own terminal status
+                # (permission_denied / no_answer) at the failure site.
+                if rc == 0:
+                    await self._set_status(call_ref, "completed", peer or "")
+            except CallBusy as exc:
+                logger.warning("call %s dropped: %s", call_ref, exc)
+                await self._set_status(call_ref, "failed", peer or "", reason="busy")
             except Exception:
                 logger.exception("API call %s failed", call_ref)
+                await self._set_status(call_ref, "failed", peer or "", reason="error")
             finally:
-                self._outbound_pending = False
+                self._active.discard(call_ref)
 
         task = asyncio.create_task(_run(), name=f"call-{call_ref}")
         self._bg_tasks.add(task)
@@ -365,27 +505,38 @@ class CallManager:
         skip_permission: bool = False,
         permission_only: bool = False,
         call_ref: str = "",
+        brief: CallBrief | None = None,
     ) -> int:
-        """Permission flow + one outbound call run. Raises CallBusy if a
-        call is already active. None engine fields resolve through runtime
-        config, then Settings."""
+        """Permission flow + one outbound call run. Raises CallBusy at
+        capacity or when this peer is already on a call. None engine fields
+        resolve through runtime config, then Settings."""
         settings = get_settings()
         peer = (peer or settings.whatsapp_recipient).lstrip("+")
         provider = await self.config.resolve("provider", provider)
         brain = await self.config.resolve("brain", brain)
         voice = await self.config.resolve("voice", voice)
-        if self._call_lock.locked():
-            raise CallBusy(peer)
-        async with self._call_lock:
+        # API calls arrive with their slot already reserved by
+        # start_outbound; the direct CLI path reserves its own here.
+        call_ref = call_ref or uuid.uuid4().hex[:12]
+        owns_slot = call_ref not in self._active
+        if owns_slot:
+            await self._reserve_slot(call_ref)
+        try:
             # Cross-restart guard: a lingering call:active lock (e.g. API
             # retry racing a live call) refuses the dial; TTL is the backstop
             # if a crash ever skips release. Inbound pickups skip this — we
             # never refuse a user who is calling us.
             lock_key = f"call:active:{peer}"
-            lock_token = call_ref or uuid.uuid4().hex
+            lock_token = call_ref
             if not await self.redis.acquire_lock(lock_key, lock_token, ttl_s=7200):
                 raise CallBusy(peer)
-            session = self.router.open_call(peer, "outbound")
+            try:
+                session = self.router.open_call(peer, "outbound")
+            except SessionConflict:
+                # Redis was down (fail-open lock) but the router knows the
+                # peer is mid-call in this process.
+                await self.redis.release_lock(lock_key, lock_token)
+                raise CallBusy(peer) from None
             session.call_ref = call_ref
             try:
                 try:
@@ -409,22 +560,35 @@ class CallManager:
                             return 0
                     else:
                         logger.info("permission request sent — waiting for Accept…")
+                        await self._set_status(call_ref, "permission_pending", peer)
                         try:
                             accepted = await session.wait_permission(timeout_s=300)
                         except TimeoutError:
                             logger.warning("permission request timed out")
+                            await self._set_status(
+                                call_ref, "permission_denied", peer, reason="timeout"
+                            )
                             return 1
                         logger.info("permission: %s", "ACCEPTED" if accepted else "REJECTED")
-                        if permission_only or not accepted:
-                            return 0 if accepted else 1
+                        if not accepted:
+                            await self._set_status(
+                                call_ref, "permission_denied", peer, reason="rejected"
+                            )
+                            return 1
+                        if permission_only:
+                            return 0
+                await self._set_status(call_ref, "dialing", peer)
                 spec = CallSpec(
                     peer=peer, direction="outbound", provider=provider,
-                    brain=brain, voice=voice, call_ref=call_ref,
+                    brain=brain, voice=voice, call_ref=call_ref, brief=brief,
                 )
                 return await self._run_call(spec, session)
             finally:
                 self.router.close_call(session)
                 await self.redis.release_lock(lock_key, lock_token)
+        finally:
+            if owns_slot:
+                self._active.discard(call_ref)
 
     # -- the one runner ------------------------------------------------------------
 
@@ -464,7 +628,7 @@ class CallManager:
                  text_bridge, service) = await _single_brain_setup(
                     self.cal, self.wa, session, spec.peer, event_type_id,
                     timezone, business, inbound=(spec.direction == "inbound"),
-                    end_call_cb=_end_call, redis=self.redis,
+                    end_call_cb=_end_call, redis=self.redis, brief=spec.brief,
                 )
             else:
                 # DUAL-BRAIN: the voice engine relays; LangGraph is the brain.
@@ -473,11 +637,13 @@ class CallManager:
                     self.cal, self.wa, session, spec.peer, event_type_id,
                     timezone, "whatsapp-voice-agent", redis=self.redis,
                 )
+                _apply_brief(service, spec.brief)
                 booking_agent = BookingAgent(
                     self.cal, event_type_id, self.wa, spec.peer, service,
                     timezone=timezone, business_name=business,
                     model=await self.config.resolve("scheduler_model"),
-                    profile_note=render_profile_block(service.profile),
+                    profile_note=render_profile_block(service.profile)
+                    + _brief_text(spec.brief),
                     redis=self.redis, end_call_cb=_end_call,
                 )
                 booking_agent.meter = meter
@@ -495,6 +661,7 @@ class CallManager:
                 logger.info("placing WhatsApp call… (provider=%s, brain=%s)",
                             spec.provider, brain)
                 await transport.place_call()
+                await self._set_status(spec.call_ref, "ringing", spec.peer)
 
             if spec.provider == "split":
                 provider_options.update(await _split_provider_options(self.config))
@@ -537,9 +704,11 @@ class CallManager:
                     await asyncio.wait_for(session.accepted.wait(), timeout=90)
                 except TimeoutError:
                     logger.warning("call was never answered; hanging up")
+                    await self._set_status(spec.call_ref, "no_answer", spec.peer)
                     await proxy.stop()
                     await session_task
                     return 1
+                await self._set_status(spec.call_ref, "in_progress", spec.peer)
                 await asyncio.sleep(0.7)  # audio path settles after pickup
             else:
                 await asyncio.sleep(1.0)  # audio path settles

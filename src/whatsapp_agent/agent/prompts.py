@@ -185,6 +185,40 @@ def render_profile_block(profile: dict[str, str] | None) -> str:
     return PROFILE_BLOCK.format(details=", ".join(details))
 
 
+# API-triggered outbound calls carry a brief: why we're calling, for whom,
+# and the acceptable slot window.
+BRIEF_BLOCK = """
+
+CALL BRIEF — this is why you are calling; use it to open the call:
+- Topic: {topic}. Open by saying you're calling about this (one sentence).
+{lines}
+"""
+
+
+def render_brief_block(
+    topic: str, attendee_name: str = "", window: str = "", email: str = ""
+) -> str:
+    """BRIEF_BLOCK from a CallBrief; empty string when there is no brief."""
+    if not topic:
+        return ""
+    lines = []
+    if attendee_name:
+        lines.append(f"- You are calling {attendee_name}; greet them by name.")
+    if window:
+        lines.append(
+            f"- Offer ONLY slots within {window}. If nothing is free in "
+            "that window, say so and ask if a nearby time works instead."
+        )
+    if email:
+        lines.append(
+            f"- Their email from the registration is {email}, already usable "
+            "for booking. Read it back ONCE (spell the part before the @) "
+            "and get a yes before booking. If they correct it, take the new "
+            "email and confirm it with confirm_email."
+        )
+    return BRIEF_BLOCK.format(topic=topic, lines="\n".join(lines))
+
+
 def build_single_brain_prompt(
     business_name: str,
     timezone: str,
@@ -192,6 +226,7 @@ def build_single_brain_prompt(
     inbound: bool,
     history: str = "",
     profile: str = "",
+    brief: str = "",
 ) -> str:
     """Full end-to-end system instruction for a single-brain voice session."""
     prompt = VOICE_RULES.format(business_name=business_name)
@@ -203,6 +238,8 @@ def build_single_brain_prompt(
     )
     if profile:
         prompt += profile
+    if brief:
+        prompt += brief
     if history:
         prompt += HISTORY_BLOCK.format(history=history)
     return prompt

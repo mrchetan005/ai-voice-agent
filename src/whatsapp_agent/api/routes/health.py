@@ -23,5 +23,6 @@ async def health(request: Request) -> JSONResponse:
         "redis": redis_status,
         "db": "degraded" if session_store is None or session_store.degraded else "ok",
         "active_call": bool(calls is not None and calls.call_active),
+        "active_calls": calls.active_call_count if calls is not None else 0,
         "version": "0.1.0",
     })

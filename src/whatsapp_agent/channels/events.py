@@ -9,9 +9,9 @@ Three layers, one file, because they share the queue vocabulary:
   permission taps, texts, buttons, accepted/ended events). Satisfies
   ``InboundWaiter``, the ONLY protocol the booking domain sees.
 
-One call at a time is a CallManager policy, not a structural limit here:
-sessions are keyed by peer and matched by call_id, so concurrent calls are
-a lock removal away.
+Concurrent calls are supported: sessions are keyed by peer and matched by
+call_id; CallManager's capacity gate decides how many run at once. One
+session per peer is the invariant enforced here (SessionConflict).
 """
 
 from __future__ import annotations
@@ -28,6 +28,10 @@ from pydantic import BaseModel
 logger = logging.getLogger("whatsapp_agent")
 
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
+
+
+class SessionConflict(RuntimeError):
+    """Peer already has an open call session in this process."""
 
 
 class CallEvent(BaseModel):
@@ -120,6 +124,8 @@ class EventRouter:
 
     def open_call(self, peer: str, direction: Literal["inbound", "outbound"]) -> CallSession:
         peer = peer.lstrip("+")
+        if peer in self._sessions:
+            raise SessionConflict(peer)
         session = CallSession(peer=peer, direction=direction)
         self._sessions[peer] = session
         return session

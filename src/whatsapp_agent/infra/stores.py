@@ -23,6 +23,11 @@ class _PgStore:
     def __init__(self, db_url: str) -> None:
         self._db_url = db_url
         self._db: Any = None
+        # Serializes execute + the reconnect path: SessionStore/RuntimeConfig
+        # are process-wide singletons, and with concurrent calls two tasks
+        # spotting a stale Neon conn would both reconnect, leaking one
+        # connection and clobbering self._db mid-use.
+        self._lock = asyncio.Lock()
 
     async def connect(self) -> None:
         import psycopg
@@ -43,24 +48,29 @@ class _PgStore:
         return self._db is None
 
     async def _execute(self, sql: str, params: tuple[Any, ...]) -> Any:
-        """One reconnect retry — Neon suspends idle connections."""
+        """One reconnect retry — Neon suspends idle connections.
+
+        connect() stays lock-free: it is called at startup (single task) or
+        from inside this lock — locking it too would deadlock the retry."""
         if self._db is None:
             return None
-        for attempt in (1, 2):
-            try:
-                return await self._db.execute(sql, params)
-            except Exception as exc:
-                if attempt == 2:
-                    logger.warning("%s query failed (dropped): %s", type(self).__name__, exc)
-                    return None
-                logger.info("%s conn stale, reconnecting: %s", type(self).__name__, exc)
-                await self.connect()
-                if self._db is None:
-                    return None
+        async with self._lock:
+            for attempt in (1, 2):
+                try:
+                    return await self._db.execute(sql, params)
+                except Exception as exc:
+                    if attempt == 2:
+                        logger.warning("%s query failed (dropped): %s", type(self).__name__, exc)
+                        return None
+                    logger.info("%s conn stale, reconnecting: %s", type(self).__name__, exc)
+                    await self.connect()
+                    if self._db is None:
+                        return None
 
     async def close(self) -> None:
         if self._db is not None:
-            await self._db.close()
+            async with self._lock:
+                await self._db.close()
 
 
 class ProfileStore(_PgStore):

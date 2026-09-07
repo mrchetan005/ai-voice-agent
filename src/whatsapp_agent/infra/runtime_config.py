@@ -53,6 +53,15 @@ def _boolean(value: Any) -> bool:
     return value
 
 
+def _int_min(minimum: int) -> Callable[[Any], int]:
+    def validate(value: Any) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise ValueError(f"must be an integer >= {minimum}")
+        return value
+
+    return validate
+
+
 # key -> (Settings attribute it falls back to, validator).
 _KEYS: dict[str, tuple[str, Callable[[Any], Any]]] = {
     "provider": ("default_provider", _valid_provider),
@@ -65,6 +74,7 @@ _KEYS: dict[str, tuple[str, Callable[[Any], Any]]] = {
     "split_tts": ("split_tts", _string),
     "split_tts_model": ("split_tts_model", _string),
     "recap_enabled": ("recap_enabled", _boolean),
+    "max_concurrent_calls": ("max_concurrent_calls", _int_min(0)),
 }
 
 

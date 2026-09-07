@@ -164,6 +164,10 @@ class WhatsAppCallTransport:
             (response.get("calls") or [{}])[0].get("id")
             or response.get("call_id")
         )
+        # Propagate before the answer arrives: with concurrent sessions the
+        # router can't fall back to "the only active call", so id-only
+        # accepted/terminate webhooks need the session to know its call_id.
+        self._session.call_id = self._session.call_id or self.call_id or ""
 
         answer = await self._session.wait_call_answer(answer_timeout_s)
         self.call_id = answer.call_id or self.call_id
@@ -178,6 +182,9 @@ class WhatsAppCallTransport:
         """Inbound leg: the caller's webhook `connect` carried an SDP OFFER;
         we answer via pre_accept + accept (same munged SDP both times)."""
         self.call_id = call_id
+        # Same propagation as place_call: terminate webhooks match strictly
+        # by call_id, and inbound sessions never learn it from an SDP answer.
+        self._session.call_id = self._session.call_id or call_id or ""
         self._pc.addTrack(self._out_track)
 
         @self._pc.on("track")

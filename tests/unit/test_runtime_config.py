@@ -62,8 +62,11 @@ class FakeCalls:
     def __init__(self) -> None:
         self.started: list[dict] = []
         self.busy = False
+        self.at_capacity = False
 
-    def start_outbound(self, **kwargs) -> str:
+    async def start_outbound(self, **kwargs) -> str:
+        if self.at_capacity:
+            raise CallBusy("at capacity")
         if self.busy:
             raise CallBusy("x")
         self.started.append(kwargs)
@@ -100,12 +103,20 @@ async def main() -> int:
           and snap["brain"]["source"] == "default"
           and set(snap["provider"]) == {"value", "source"})
 
-    for bad in (("nope", "x"), ("provider", "bogus"), ("recap_enabled", "yes")):
+    for bad in (("nope", "x"), ("provider", "bogus"), ("recap_enabled", "yes"),
+                ("max_concurrent_calls", "3"), ("max_concurrent_calls", True),
+                ("max_concurrent_calls", -1)):
         try:
             await rc2.set(*bad)
             check(f"set{bad} rejected", False)
         except ValueError:
             check(f"set{bad} rejected", True)
+
+    from whatsapp_agent.infra.runtime_config import _KEYS
+    check("max_concurrent_calls validator accepts 5",
+          _KEYS["max_concurrent_calls"][1](5) == 5)
+    check("max_concurrent_calls resolves to Settings default",
+          await rc.resolve("max_concurrent_calls") == 3)
 
     await rc2.set("provider", "gemini-live")  # DB no-op, must still bust cache
     check("set() invalidates the cfg:runtime cache",
@@ -161,11 +172,11 @@ async def main() -> int:
         app.state.redis = _fake_gateway()
 
         resp = await client.post("/calls", headers=auth,
-                                 json={"to": "919", "provider": "split"},
+                                 json={"to": "919876543210", "provider": "split"},
                                  params={})
         check("POST /calls -> 202 with call_ref",
               resp.status_code == 202 and resp.json() == {"call_ref": "ref1"}
-              and fake_calls.started[0]["peer"] == "919"
+              and fake_calls.started[0]["peer"] == "919876543210"
               and fake_calls.started[0]["provider"] == "split")
 
         headers = {**auth, "Idempotency-Key": "k1"}
@@ -186,6 +197,58 @@ async def main() -> int:
               resp.status_code == 422 and len(fake_calls.started) == 2)
         resp = await client.post("/calls", headers=auth, json={"brain": "triple"})
         check("invalid brain -> 422", resp.status_code == 422)
+
+        # -- capacity + brief + status ---------------------------------------------
+        fake_calls.at_capacity = True
+        resp = await client.post("/calls", headers=auth, json={})
+        check("at capacity -> 409 with distinct error body",
+              resp.status_code == 409 and resp.json() == {"error": "at capacity"})
+        fake_calls.at_capacity = False
+
+        brief = {
+            "topic": "Product demo",
+            "time_range": {"from": "2036-01-05T10:00:00", "to": "2036-01-06T18:00:00"},
+            "attendee_name": "Chetan",
+            "attendee_email": "chetan@example.com",
+            "timezone": "Asia/Kolkata",
+        }
+        resp = await client.post("/calls", headers=auth,
+                                 json={"to": "919876543210", "brief": brief})
+        sent = fake_calls.started[-1]["brief"]
+        check("brief -> 202 and CallBrief threaded through",
+              resp.status_code == 202
+              and sent is not None and sent.topic == "Product demo"
+              and sent.attendee_name == "Chetan"
+              and sent.attendee_email == "chetan@example.com"
+              and sent.window_start is not None
+              and sent.window_start.tzinfo is not None  # naive input got the brief tz
+              and sent.window_start.isoformat() == "2036-01-05T10:00:00+05:30")
+
+        started_before = len(fake_calls.started)
+        for name, bad in (
+            ("bad phone", {"to": "12ab", "brief": brief}),
+            ("topicless brief", {"brief": {"topic": ""}}),
+            ("bad email", {"brief": {"topic": "x", "attendee_email": "not-an-email"}}),
+            ("from >= to", {"brief": {"topic": "x", "time_range": {
+                "from": "2036-01-06T10:00:00", "to": "2036-01-05T10:00:00"}}}),
+            ("range in the past", {"brief": {"topic": "x", "time_range": {
+                "from": "2020-01-01T10:00:00", "to": "2020-01-02T10:00:00"}}}),
+            ("bad timezone", {"brief": {"topic": "x", "timezone": "Mars/Olympus"}}),
+        ):
+            resp = await client.post("/calls", headers=auth, json=bad)
+            check(f"{name} -> 422 with error body",
+                  resp.status_code == 422 and "error" in resp.json())
+        check("no call started by invalid bodies",
+              len(fake_calls.started) == started_before)
+
+        resp = await client.get("/calls/deadbeef0000", headers=auth)
+        check("GET /calls/{ref} unknown -> 404", resp.status_code == 404)
+        await app.state.redis.set_json(
+            "call:status:abc123", {"call_ref": "abc123", "status": "in_progress",
+                                   "peer": "919", "updated_at": "t"}, ttl_s=60)
+        resp = await client.get("/calls/abc123", headers=auth)
+        check("GET /calls/{ref} -> 200 with the status payload",
+              resp.status_code == 200 and resp.json()["status"] == "in_progress")
     finally:
         del os.environ["ADMIN_TOKEN"]
 

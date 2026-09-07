@@ -155,7 +155,7 @@ async def main() -> int:
     body = resp.json()
     check("/health 200 with expected keys",
           resp.status_code == 200 and set(body) == {
-              "status", "redis", "db", "active_call", "version"}
+              "status", "redis", "db", "active_call", "active_calls", "version"}
           and body["redis"] == "disabled")
 
     await client.aclose()
