@@ -94,6 +94,69 @@ async def dispatch_agent(
         return dispatch.id
 
 
+async def create_inbound_trunk(
+    lk: LiveKitSettings,
+    *,
+    name: str,
+    numbers: list[str],
+    allowed_addresses: list[str] | None = None,
+    auth_username: str = "",
+    auth_password: str = "",
+) -> str:
+    """Create an inbound SIP trunk that accepts calls placed to `numbers`.
+
+    Returns the trunk id, which a dispatch rule then routes into rooms.
+    """
+    async with livekit_api(lk) as lkapi:
+        info = await lkapi.sip.create_inbound_trunk(
+            api.CreateSIPInboundTrunkRequest(
+                trunk=api.SIPInboundTrunkInfo(
+                    name=name,
+                    numbers=numbers,
+                    allowed_addresses=list(allowed_addresses or []),
+                    auth_username=auth_username,
+                    auth_password=auth_password,
+                )
+            )
+        )
+        return info.sip_trunk_id
+
+
+async def create_inbound_dispatch_rule(
+    lk: LiveKitSettings,
+    *,
+    name: str,
+    trunk_ids: list[str],
+    room_prefix: str,
+    worker_name: str,
+    metadata: SessionMetadata,
+) -> str:
+    """Route inbound calls on `trunk_ids` into a per-caller room and dispatch
+    the agent fleet into each. The worker fills session_id/room from the job;
+    `metadata` only needs to carry agent_id and channel="sip"."""
+    async with livekit_api(lk) as lkapi:
+        info = await lkapi.sip.create_dispatch_rule(
+            api.CreateSIPDispatchRuleRequest(
+                name=name,
+                trunk_ids=list(trunk_ids),
+                rule=api.SIPDispatchRule(
+                    dispatch_rule_individual=api.SIPDispatchRuleIndividual(
+                        room_prefix=room_prefix,
+                    )
+                ),
+                room_config=api.RoomConfiguration(
+                    agents=[
+                        api.RoomAgentDispatch(
+                            agent_name=worker_name,
+                            metadata=metadata.to_json(),
+                        )
+                    ],
+                ),
+            )
+        )
+        return info.sip_dispatch_rule_id
+
+
 async def create_sip_outbound(
     lk: LiveKitSettings,
     *,
