@@ -59,10 +59,23 @@ Three layers, one rule:
 - **`voiceagent.platform` / `voiceagent.channels`**: FastAPI control plane and
   channel adapters (browser tokens, SIP trunks, WhatsApp bridge).
 
+## Documentation
+
+- **Start here:** [quickstart](docs/quickstart.md) · [concepts](docs/concepts.md)
+- **Build agents:** [configuration](docs/configuration.md) · [prompts](docs/prompts.md) · [tools](docs/tools.md) · [memory](docs/memory.md)
+- **Providers:** [catalogue](docs/providers.md) · [adding a provider](docs/adding-a-provider.md)
+- **Channels:** [browser](docs/channels-browser.md) · [sip](docs/channels-sip.md) · [whatsapp](docs/channels-whatsapp.md) · [adding a channel](docs/adding-a-channel.md)
+- **Deploy:** [local](docs/deploy-local.md) · [kubernetes](docs/deploy-k8s.md) · [gke](docs/deploy-gke.md) · [eks](docs/deploy-eks.md)
+- **Operate:** [observability](docs/observability.md) · [recording](docs/recording.md) · [load-testing](docs/load-testing.md)
+- **Scope:** [limitations & deferred work](docs/limitations.md)
+
 ## Status
 
-Under active development on this branch. See `docs/` for the quickstart,
-concepts, provider/channel guides, and Kubernetes deployment.
+Framework and deployment path are complete on this branch (browser, SIP, and
+WhatsApp channels; compose + Kubernetes). The full offline suite is green and
+runs with no keys or network. Live third-party checks (real provider calls, a
+softphone SIP call, a live Meta WhatsApp call) are gated on credentials and
+tracked in [limitations](docs/limitations.md).
 
 ## Development
 
