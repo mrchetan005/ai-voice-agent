@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from voiceagent.livekit.api import delete_room, mint_join_token
 from voiceagent.metadata import SessionMetadata
+from voiceagent.observability import metrics
 
 router = APIRouter()
 
@@ -66,6 +67,7 @@ async def create_session(body: CreateSessionIn, request: Request) -> CreateSessi
         room=room,
         user_id=body.user_id,
     )
+    metrics.session_created(body.agent_id, body.channel)
     return CreateSessionOut(
         session_id=session_id,
         room=room,

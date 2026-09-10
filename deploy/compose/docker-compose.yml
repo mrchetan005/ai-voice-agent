@@ -86,6 +86,13 @@ services:
       PLATFORM_DATABASE_URL: postgresql://voiceagent:voiceagent@postgres:5432/voiceagent
       PLATFORM_REDIS_URL: redis://redis:6379/0
       VOICEAGENT_AGENTS_FILE: /app/examples/agents.yaml
+      # Recording (opt-in): RECORDING_ENABLED=true docker compose --profile recording up
+      RECORDING_ENABLED: ${RECORDING_ENABLED:-false}
+      RECORDING_S3_ENDPOINT: http://minio:9000
+      RECORDING_BUCKET: recordings
+      RECORDING_ACCESS_KEY: voiceagent
+      RECORDING_SECRET_KEY: voiceagent-secret
+      RECORDING_REGION: us-east-1
     ports:
       - "9100:9100"           # prometheus metrics
     depends_on:
@@ -107,6 +114,16 @@ services:
       - "9001:9001"
     volumes:
       - minio-data:/data
+
+  # One-shot: create the recordings bucket, then exit.
+  minio-init:
+    profiles: ["recording"]
+    image: minio/mc:latest
+    depends_on: [minio]
+    entrypoint: >
+      /bin/sh -c "until mc alias set local http://minio:9000 voiceagent voiceagent-secret;
+      do echo waiting for minio; sleep 1; done;
+      mc mb -p local/recordings; mc anonymous set download local/recordings; exit 0"
 
   egress:
     profiles: ["recording"]

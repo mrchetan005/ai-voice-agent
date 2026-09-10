@@ -78,6 +78,8 @@ class ObservabilitySettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=_ENV_FILE, extra="ignore")
 
     otel_exporter_otlp_endpoint: str = ""
+    otel_exporter_otlp_protocol: str = "http/protobuf"  # or "grpc"
+    otel_service_name: str = "voiceagent"
     metrics_enabled: bool = True
 
 

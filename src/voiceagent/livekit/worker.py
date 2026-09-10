@@ -24,6 +24,7 @@ from voiceagent.livekit.providers import missing_provider_keys
 from voiceagent.livekit.recording import start_room_recording
 from voiceagent.memory import memory_from_config
 from voiceagent.metadata import SessionMetadata
+from voiceagent.observability import metrics, otel
 from voiceagent.settings import Settings, SettingsError, load_settings
 from voiceagent.store import SessionStore, StatusStore
 
@@ -67,6 +68,15 @@ def _prewarm(proc: JobProcess) -> None:
     from livekit.plugins import silero
 
     proc.userdata["vad"] = silero.VAD.load()
+    # Once per job process: export AgentSession spans if an OTLP endpoint is set.
+    _, settings = _worker_state()
+    provider = otel.build_tracer_provider(
+        settings.observability, service_name="voiceagent-worker"
+    )
+    if provider is not None:
+        from livekit.agents.telemetry import set_tracer_provider
+
+        set_tracer_provider(provider)
 
 
 async def _run_session(ctx: JobContext, agents_by_name: dict[str, VoiceAgent],
@@ -103,7 +113,10 @@ async def _run_session(ctx: JobContext, agents_by_name: dict[str, VoiceAgent],
     memory_key = meta.memory_key or meta.user_id or ids.session_id
 
     runtime = SessionRuntime(ids=ids, memory=memory, memory_key=memory_key)
-    runtime.emit = make_dispatcher(va.event_handlers)
+    handlers = list(va.event_handlers)
+    if settings.observability.metrics_enabled:
+        handlers.append(metrics.on_event)
+    runtime.emit = make_dispatcher(handlers)
 
     history = await memory.load(memory_key) if memory else []
     vad = ctx.proc.userdata.get("vad") if va.config.mode == "pipeline" else None
@@ -135,6 +148,8 @@ async def _run_session(ctx: JobContext, agents_by_name: dict[str, VoiceAgent],
         runtime.emit(
             SessionEnded(ids=ids, reason=close_info["reason"], duration_s=duration)
         )
+        if settings.observability.metrics_enabled:
+            metrics.record_cost(ids.agent_id, usage, cost["total_usd"])
         await status.update(
             ids.session_id,
             status="ended",

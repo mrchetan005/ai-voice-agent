@@ -1,8 +1,10 @@
-"""Liveness and readiness."""
+"""Liveness, readiness, and Prometheus metrics."""
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Request, Response
+
+from voiceagent.observability import metrics
 
 router = APIRouter()
 
@@ -10,6 +12,12 @@ router = APIRouter()
 @router.get("/healthz")
 async def healthz() -> dict:
     return {"status": "ok"}
+
+
+@router.get("/metrics")
+async def prometheus_metrics() -> Response:
+    body, content_type = metrics.render_latest()
+    return Response(content=body, media_type=content_type)
 
 
 @router.get("/readyz")
