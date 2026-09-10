@@ -1,0 +1,25 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "111111111111111",
+      "changes": [
+        {
+          "field": "calls",
+          "value": {
+            "messaging_product": "whatsapp",
+            "calls": [
+              {
+                "id": "wacid.OUT_XYZ789",
+                "from": "919876543210",
+                "event": "terminate",
+                "direction": "BUSINESS_INITIATED",
+                "timestamp": "1725900123"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

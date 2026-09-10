@@ -28,7 +28,12 @@ platform = [
 ]
 whatsapp = [
     "aiortc>=1.9",
+    "av>=12",                       # used directly for resampling (aiortc ships it)
     "httpx>=0.27",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "livekit>=1.1",                 # rtc room bridge (no livekit-agents here)
+    "livekit-api>=1.2",            # dispatch the agent + mint the bridge token
 ]
 obs = [
     "prometheus-client>=0.20",

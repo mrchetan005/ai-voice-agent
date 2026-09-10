@@ -1,0 +1,28 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "111111111111111",
+      "changes": [
+        {
+          "field": "calls",
+          "value": {
+            "messaging_product": "whatsapp",
+            "calls": [
+              {
+                "id": "wacid.OUT_XYZ789",
+                "from": "919876543210",
+                "event": "accept",
+                "direction": "BUSINESS_INITIATED",
+                "session": {
+                  "sdp_type": "answer",
+                  "sdp": "v=0\r\no=- 200 2 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=rtpmap:111 opus/48000/2\r\n"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

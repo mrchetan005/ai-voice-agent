@@ -3217,6 +3217,7 @@ agents = [
 all = [
     { name = "aiortc" },
     { name = "asyncpg" },
+    { name = "av" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "livekit" },
@@ -3242,7 +3243,12 @@ platform = [
 ]
 whatsapp = [
     { name = "aiortc" },
+    { name = "av" },
+    { name = "fastapi" },
     { name = "httpx" },
+    { name = "livekit" },
+    { name = "livekit-api" },
+    { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.dev-dependencies]
@@ -3257,12 +3263,16 @@ dev = [
 requires-dist = [
     { name = "aiortc", marker = "extra == 'whatsapp'", specifier = ">=1.9" },
     { name = "asyncpg", marker = "extra == 'platform'", specifier = ">=0.29" },
+    { name = "av", marker = "extra == 'whatsapp'", specifier = ">=12" },
     { name = "fastapi", marker = "extra == 'platform'", specifier = ">=0.115" },
+    { name = "fastapi", marker = "extra == 'whatsapp'", specifier = ">=0.115" },
     { name = "httpx", marker = "extra == 'platform'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'whatsapp'", specifier = ">=0.27" },
     { name = "livekit", marker = "extra == 'agents'", specifier = ">=1.1" },
+    { name = "livekit", marker = "extra == 'whatsapp'", specifier = ">=1.1" },
     { name = "livekit-agents", extras = ["deepgram", "cartesia", "elevenlabs", "google", "openai", "silero", "turn-detector"], marker = "extra == 'agents'", specifier = "~=1.8.0" },
     { name = "livekit-api", marker = "extra == 'agents'", specifier = ">=1.2" },
+    { name = "livekit-api", marker = "extra == 'whatsapp'", specifier = ">=1.2" },
     { name = "opentelemetry-exporter-otlp", marker = "extra == 'obs'", specifier = ">=1.25" },
     { name = "opentelemetry-sdk", marker = "extra == 'obs'", specifier = ">=1.25" },
     { name = "prometheus-client", marker = "extra == 'obs'", specifier = ">=0.20" },
@@ -3271,6 +3281,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "redis", marker = "extra == 'platform'", specifier = ">=5.0" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'platform'", specifier = ">=0.30" },
+    { name = "uvicorn", extras = ["standard"], marker = "extra == 'whatsapp'", specifier = ">=0.30" },
     { name = "voiceagent", extras = ["agents", "platform", "whatsapp", "obs"], marker = "extra == 'all'" },
 ]
 provides-extras = ["agents", "platform", "whatsapp", "obs", "all"]

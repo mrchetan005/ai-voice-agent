@@ -108,6 +108,29 @@ class RecordingSettings(BaseSettings):
         return missing
 
 
+class WhatsAppSettings(BaseSettings):
+    """Meta WhatsApp Calling — only the standalone `voiceagent-whatsapp`
+    service reads these. Empty by default so the worker/API never require them."""
+
+    model_config = SettingsConfigDict(env_prefix="WHATSAPP_", env_file=_ENV_FILE, extra="ignore")
+
+    phone_number_id: str = ""
+    access_token: str = ""
+    verify_token: str = ""  # webhook GET-verify handshake (hub.verify_token)
+    app_secret: str = ""  # validates X-Hub-Signature-256 on POSTs (optional)
+    graph_version: str = "v24.0"
+    port: int = 8090
+    default_agent: str = ""  # agent_id that serves inbound calls
+
+    def require_credentials(self) -> list[str]:
+        missing = []
+        if not self.phone_number_id:
+            missing.append("WHATSAPP_PHONE_NUMBER_ID")
+        if not self.access_token:
+            missing.append("WHATSAPP_ACCESS_TOKEN")
+        return missing
+
+
 @dataclass(slots=True)
 class Settings:
     livekit: LiveKitSettings
@@ -116,6 +139,7 @@ class Settings:
     agent_source: AgentSourceSettings
     observability: ObservabilitySettings
     recording: RecordingSettings
+    whatsapp: WhatsAppSettings
 
 
 class SettingsError(RuntimeError):
@@ -133,6 +157,7 @@ def load_settings(*, require_livekit: bool = False) -> Settings:
         ("agent_source", AgentSourceSettings),
         ("observability", ObservabilitySettings),
         ("recording", RecordingSettings),
+        ("whatsapp", WhatsAppSettings),
     ):
         try:
             groups[name] = cls()

@@ -1,0 +1,30 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "111111111111111",
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "messaging_product": "whatsapp",
+            "messages": [
+              {
+                "from": "919876543210",
+                "id": "wamid.PERM123",
+                "type": "interactive",
+                "interactive": {
+                  "type": "call_permission_reply",
+                  "call_permission_reply": {
+                    "response": "accept",
+                    "expiration_timestamp": "1725903600"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
