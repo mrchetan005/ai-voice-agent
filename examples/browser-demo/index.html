@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>voiceagent — browser demo</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; background: #101418; color: #e6e9ec;
+         max-width: 640px; margin: 3rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.3rem; } code { background: #1c2228; padding: 2px 5px; border-radius: 4px; }
+  fieldset { border: 1px solid #2a323a; border-radius: 8px; margin-bottom: 1rem; }
+  label { display: block; margin: .5rem 0 .15rem; font-size: .85rem; color: #9aa4ad; }
+  input { width: 100%; box-sizing: border-box; padding: .45rem; border-radius: 6px;
+          border: 1px solid #2a323a; background: #161b21; color: inherit; }
+  button { padding: .55rem 1.2rem; border-radius: 6px; border: 0; cursor: pointer;
+           background: #3b82f6; color: white; font-size: 1rem; margin-top: .75rem; }
+  button:disabled { background: #2a323a; cursor: default; }
+  #state { margin: 1rem 0; font-weight: 600; }
+  #log { background: #0b0e11; border-radius: 8px; padding: .75rem; height: 260px;
+         overflow-y: auto; font: .8rem/1.5 ui-monospace, monospace; white-space: pre-wrap; }
+  .u { color: #7dd3fc; } .a { color: #86efac; } .s { color: #9aa4ad; }
+</style>
+</head>
+<body>
+<h1>voiceagent browser demo</h1>
+<p>Creates a session via the platform API, joins the LiveKit room, publishes your
+microphone, and plays the agent's audio. The <code>mock-demo</code> agent needs no API keys.</p>
+
+<fieldset>
+  <legend>Session</legend>
+  <label for="api">Platform API base URL</label>
+  <input id="api" value="http://localhost:8080" />
+  <label for="tok">Platform API token</label>
+  <input id="tok" value="devtoken" />
+  <label for="agent">Agent ID</label>
+  <input id="agent" value="mock-demo" />
+</fieldset>
+<button id="btn">Start voice session</button>
+<div id="state">idle</div>
+<div id="log"></div>
+
+<script type="module">
+import {
+  Room, RoomEvent, Track, createLocalAudioTrack,
+} from "https://cdn.jsdelivr.net/npm/livekit-client@2/+esm";
+
+const $ = (id) => document.getElementById(id);
+const log = (cls, msg) => {
+  const el = document.createElement("div");
+  el.className = cls;
+  el.textContent = `${new Date().toLocaleTimeString()}  ${msg}`;
+  $("log").append(el);
+  $("log").scrollTop = $("log").scrollHeight;
+};
+const setState = (s) => { $("state").textContent = s; };
+
+let room = null;
+
+$("btn").onclick = async () => {
+  if (room) { await room.disconnect(); room = null; $("btn").textContent = "Start voice session"; setState("idle"); return; }
+  $("btn").disabled = true;
+  try {
+    setState("creating session…");
+    const res = await fetch(`${$("api").value}/v1/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${$("tok").value}` },
+      body: JSON.stringify({ agent_id: $("agent").value }),
+    });
+    if (!res.ok) throw new Error(`POST /v1/sessions -> ${res.status}: ${await res.text()}`);
+    const { token, livekit_url, room: roomName, session_id } = await res.json();
+    log("s", `session ${session_id} in room ${roomName}`);
+
+    room = new Room();
+    room.on(RoomEvent.TrackSubscribed, (track, _pub, participant) => {
+      if (track.kind === Track.Kind.Audio) {
+        track.attach();  // autoplays agent audio
+        log("s", `subscribed to audio from ${participant.identity}`);
+      }
+    });
+    room.on(RoomEvent.ParticipantConnected, (p) => log("s", `participant joined: ${p.identity}`));
+    room.on(RoomEvent.Disconnected, () => { setState("disconnected"); });
+    // Agent transcriptions arrive as text streams on the "lk.transcription" topic.
+    room.registerTextStreamHandler("lk.transcription", async (reader, participant) => {
+      const text = await reader.readAll();
+      const mine = participant?.identity === room.localParticipant.identity;
+      log(mine ? "u" : "a", `${mine ? "you" : "agent"}: ${text}`);
+    });
+    room.on(RoomEvent.ParticipantAttributesChanged, (attrs, participant) => {
+      if (attrs["lk.agent.state"]) setState(`agent: ${attrs["lk.agent.state"]}`);
+    });
+
+    setState("connecting…");
+    await room.connect(livekit_url, token);
+    const mic = await createLocalAudioTrack({ echoCancellation: true, noiseSuppression: true });
+    await room.localParticipant.publishTrack(mic);
+    setState("connected — speak!");
+    $("btn").textContent = "Hang up";
+  } catch (err) {
+    console.error(err);
+    log("s", `ERROR: ${err.message}`);
+    setState("error");
+    if (room) { await room.disconnect(); room = null; }
+  } finally {
+    $("btn").disabled = false;
+  }
+};
+</script>
+</body>
+</html>

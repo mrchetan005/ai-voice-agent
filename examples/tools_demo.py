@@ -37,4 +37,4 @@ async def book_appointment(ctx: ToolContext, weekday: str, time: str, name: str)
 
 @tool(description="Get today's date and the current time")
 def current_datetime() -> str:  # sync tools work too
-    return dt.datetime.now(dt.timezone.utc).strftime("%A %Y-%m-%d %H:%M UTC")
+    return dt.datetime.now(dt.UTC).strftime("%A %Y-%m-%d %H:%M UTC")

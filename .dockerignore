@@ -3,11 +3,13 @@
 .serena/
 .env
 .env.*
+!.env.example
 __pycache__/
 *.py[oc]
 dist/
 build/
 tests/
-examples/
+deploy/
+docs/
 *.md
 !README.md

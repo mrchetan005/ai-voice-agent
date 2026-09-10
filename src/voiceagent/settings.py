@@ -20,8 +20,16 @@ class LiveKitSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LIVEKIT_", env_file=_ENV_FILE, extra="ignore")
 
     url: str = "ws://localhost:7880"
+    # URL browsers should connect to, when it differs from `url` (e.g. inside
+    # docker-compose the API reaches LiveKit at ws://livekit:7880 while the
+    # browser needs ws://localhost:7880). Empty = same as `url`.
+    public_url: str = ""
     api_key: str = ""
     api_secret: str = ""
+
+    @property
+    def effective_public_url(self) -> str:
+        return self.public_url or self.url
 
     def require_credentials(self) -> list[str]:
         """Names of missing required variables (empty when valid)."""
@@ -58,6 +66,10 @@ class AgentSourceSettings(BaseSettings):
 
     agents: str = ""  # comma-separated "pkg.module:attr" paths to VoiceAgent objects
     agents_file: str = ""  # path to a YAML file of agent configs
+    # LiveKit agent_name the worker fleet registers under. One worker serves
+    # ALL loaded agents: dispatch metadata (SessionMetadata.agent_id) selects
+    # which VoiceAgent runs. Run separate fleets by using different names.
+    worker_name: str = "voiceagent"
 
 
 class ObservabilitySettings(BaseSettings):

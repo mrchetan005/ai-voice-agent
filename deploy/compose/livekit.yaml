@@ -1,0 +1,19 @@
+# LiveKit server config for LOCAL DEVELOPMENT only.
+# Single node, no TURN, no external IP discovery, dev credentials.
+port: 7880
+rtc:
+  tcp_port: 7881
+  port_range_start: 50100
+  port_range_end: 50160
+  use_external_ip: false
+keys:
+  # Must match LIVEKIT_API_KEY / LIVEKIT_API_SECRET in .env (secret >= 32 chars).
+  devkey: devsecret_devsecret_devsecret_123456
+# Shared bus for egress/sip RPC (the compose stack always runs redis).
+redis:
+  address: redis:6379
+room:
+  auto_create: true
+logging:
+  level: info
+  json: false
