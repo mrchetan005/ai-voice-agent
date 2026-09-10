@@ -1,0 +1,49 @@
+# Config-first agent definitions. Load with:
+#   VOICEAGENT_AGENTS_FILE=examples/agents.yaml voiceagent-worker start
+# or in Python:  [VoiceAgent.from_config(c) for c in load_agents_yaml("examples/agents.yaml")]
+agents:
+  # Zero-credit demo: mock STT/LLM/TTS prove the full media path without keys.
+  - name: mock-demo
+    mode: pipeline
+    prompt:
+      text: You are a demo agent. Echo what the user says.
+    llm: { provider: mock }
+    stt: { provider: mock }
+    tts: { provider: mock }
+    turn_detection: vad
+
+  # Real pipeline: Deepgram STT -> Gemini -> Cartesia TTS (needs API keys).
+  - name: sales-pipeline
+    mode: pipeline
+    prompt:
+      text: |
+        You are a concise, friendly sales assistant for {company}.
+        Answer in at most two short sentences — this is a voice call.
+      variables:
+        company: Acme Corp
+    llm: { provider: google, model: gemini-2.5-flash, temperature: 0.4 }
+    stt: { provider: deepgram, model: nova-3, language: en }
+    tts: { provider: cartesia }
+    tools:
+      - examples.tools_demo:get_available_slots
+      - examples.tools_demo:book_appointment
+      - examples.tools_demo:current_datetime
+    greeting: Greet the caller briefly and ask how you can help.
+    memory:
+      backend: redis
+    turn_detection: multilingual
+
+  # Realtime: same agent shape, one model does STT+LLM+TTS (needs GOOGLE_API_KEY).
+  - name: sales-realtime
+    mode: realtime
+    prompt:
+      text: |
+        You are a concise, friendly sales assistant for {company}.
+        Answer in at most two short sentences — this is a voice call.
+      variables:
+        company: Acme Corp
+    realtime: { provider: google }
+    tools:
+      - examples.tools_demo:get_available_slots
+      - examples.tools_demo:book_appointment
+    greeting: Greet the caller briefly and ask how you can help.
