@@ -8,15 +8,15 @@ therefore homogeneous and scale as one Deployment.
 
 from __future__ import annotations
 
-import importlib
+import inspect
 import logging
+import os
 import time
 from typing import Any
 
 from livekit.agents import AgentServer, AutoSubscribe, JobContext, JobProcess, cli
 
-from voiceagent.agent import VoiceAgent
-from voiceagent.config import load_agents_yaml
+from voiceagent.agent import VoiceAgent, load_agents
 from voiceagent.events import SessionEnded, SessionIDs, SessionStarted
 from voiceagent.livekit.bridge import attach_bridge, make_dispatcher, spawn
 from voiceagent.livekit.compile import SessionRuntime, build_session
@@ -42,9 +42,14 @@ def validate_agents(agents: list[VoiceAgent]) -> None:
     names = [a.name for a in agents]
     if len(set(names)) != len(names):
         raise SettingsError(f"duplicate agent names: {names}")
-    missing: set[str] = set()
+
+
+def missing_keys_by_agent(agents: list[VoiceAgent]) -> dict[str, list[str]]:
+    """Per-agent missing provider env vars (empty dict = everything servable)."""
+    out: dict[str, list[str]] = {}
     for agent in agents:
         cfg = agent.config
+        missing: set[str] = set()
         if cfg.mode == "realtime":
             assert cfg.realtime is not None
             missing.update(missing_provider_keys("realtime", cfg.realtime.provider))
@@ -53,10 +58,9 @@ def validate_agents(agents: list[VoiceAgent]) -> None:
             missing.update(missing_provider_keys("llm", cfg.llm.provider))
             missing.update(missing_provider_keys("stt", cfg.stt.provider))
             missing.update(missing_provider_keys("tts", cfg.tts.provider))
-    if missing:
-        raise SettingsError(
-            "missing provider API keys for configured agents: " + ", ".join(sorted(missing))
-        )
+        if missing:
+            out[agent.name] = sorted(missing)
+    return out
 
 
 def _prewarm(proc: JobProcess) -> None:
@@ -91,7 +95,11 @@ async def _run_session(ctx: JobContext, agents_by_name: dict[str, VoiceAgent],
     )
     status = StatusStore(settings.platform.redis_url)
     store = SessionStore(settings.platform.database_url)
-    memory = memory_from_config(va.config.memory)
+    memory = memory_from_config(
+        va.config.memory,
+        redis_url=settings.platform.redis_url or None,
+        postgres_url=settings.platform.database_url or None,
+    )
     memory_key = meta.memory_key or meta.user_id or ids.session_id
 
     runtime = SessionRuntime(ids=ids, memory=memory, memory_key=memory_key)
@@ -166,7 +174,25 @@ async def _run_session(ctx: JobContext, agents_by_name: dict[str, VoiceAgent],
 def build_server(agents: list[VoiceAgent], settings: Settings | None = None) -> AgentServer:
     settings = settings or load_settings()
     validate_agents(agents)
-    agents_by_name = {a.name: a for a in agents}
+    unservable = missing_keys_by_agent(agents)
+    for name, missing in unservable.items():
+        logger.error(
+            "agent %r DISABLED on this worker — missing provider keys: %s",
+            name, ", ".join(missing),
+        )
+    ready = [a for a in agents if a.name not in unservable]
+    if not ready:
+        raise SettingsError(
+            "no servable agents — missing provider API keys: "
+            + "; ".join(f"{n}: {', '.join(m)}" for n, m in unservable.items())
+        )
+    agents_by_name = {a.name: a for a in ready}
+
+    # Job subprocesses (Linux) pickle the entrypoint BY REFERENCE, so it must
+    # be a module-level function; state lives in a module global that child
+    # processes rebuild from the environment (see _worker_state).
+    global _WORKER_STATE
+    _WORKER_STATE = (agents_by_name, settings)
 
     ws = settings.worker
     server = AgentServer(
@@ -179,10 +205,7 @@ def build_server(agents: list[VoiceAgent], settings: Settings | None = None) -> 
         api_key=settings.livekit.api_key or None,
         api_secret=settings.livekit.api_secret or None,
     )
-
-    @server.rtc_session(agent_name=settings.agent_source.worker_name)
-    async def entrypoint(ctx: JobContext) -> None:
-        await _run_session(ctx, agents_by_name, settings)
+    server.rtc_session(agent_name=settings.agent_source.worker_name)(_entrypoint)
 
     logger.info(
         "worker %r serving agents: %s",
@@ -192,37 +215,73 @@ def build_server(agents: list[VoiceAgent], settings: Settings | None = None) -> 
     return server
 
 
+_WORKER_STATE: tuple[dict[str, VoiceAgent], Settings] | None = None
+
+
+def _worker_state() -> tuple[dict[str, VoiceAgent], Settings]:
+    """Worker state; job subprocesses rebuild it from the environment."""
+    global _WORKER_STATE
+    if _WORKER_STATE is None:
+        settings = load_settings()
+        agents = load_agents(settings)
+        unservable = missing_keys_by_agent(agents)
+        _WORKER_STATE = ({a.name: a for a in agents if a.name not in unservable}, settings)
+    return _WORKER_STATE
+
+
+async def _entrypoint(ctx: JobContext) -> None:
+    agents_by_name, settings = _worker_state()
+    await _run_session(ctx, agents_by_name, settings)
+
+
+def _export_agents_env(agents: tuple[VoiceAgent, ...]) -> None:
+    """Make programmatic agents recoverable in spawned job subprocesses.
+
+    Finds each agent as a module-level attribute of the calling script and
+    exports VOICEAGENT_AGENTS so a child process can re-import them ("__main__"
+    resolves to the re-imported entry script under multiprocessing spawn).
+    """
+    if os.environ.get("VOICEAGENT_AGENTS") or os.environ.get("VOICEAGENT_AGENTS_FILE"):
+        return
+    caller = next(
+        (
+            f.frame
+            for f in inspect.stack()
+            if not f.frame.f_globals.get("__name__", "").startswith("voiceagent")
+        ),
+        None,
+    )
+    if caller is None:
+        return
+    module_name = caller.f_globals.get("__name__", "")
+    specs: list[str] = []
+    for agent in agents:
+        attr = next(
+            (name for name, val in caller.f_globals.items() if val is agent), None
+        )
+        if attr is None:
+            logger.warning(
+                "agent %r is not a module-level variable of %s; job subprocesses "
+                "will not find it — assign it at module level or use "
+                "VOICEAGENT_AGENTS/VOICEAGENT_AGENTS_FILE",
+                agent.name,
+                module_name,
+            )
+            return
+        specs.append(f"{module_name}:{attr}")
+    os.environ["VOICEAGENT_AGENTS"] = ",".join(specs)
+
+
 def run(*agents: VoiceAgent) -> None:
     """Entry for `voiceagent.run(agent)`: boots the livekit worker CLI."""
+    _export_agents_env(agents)
     settings = load_settings()
     cli.run_app(build_server(list(agents), settings))
-
-
-def load_agents_from_settings(settings: Settings) -> list[VoiceAgent]:
-    src = settings.agent_source
-    agents: list[VoiceAgent] = []
-    if src.agents:
-        for path in filter(None, (p.strip() for p in src.agents.split(","))):
-            module_path, _, attr = path.partition(":")
-            if not attr:
-                raise SettingsError(f"VOICEAGENT_AGENTS entry {path!r} must be 'pkg.module:attr'")
-            obj = getattr(importlib.import_module(module_path), attr)
-            if callable(obj) and not isinstance(obj, VoiceAgent):
-                obj = obj()
-            if isinstance(obj, VoiceAgent):
-                agents.append(obj)
-            elif isinstance(obj, list | tuple):
-                agents.extend(obj)
-            else:
-                raise SettingsError(f"{path!r} resolved to {type(obj).__name__}, not VoiceAgent(s)")
-    if src.agents_file:
-        agents.extend(VoiceAgent.from_config(c) for c in load_agents_yaml(src.agents_file))
-    return agents
 
 
 def worker_main() -> None:
     """Console script `voiceagent-worker`: agents from env, then the livekit CLI."""
     logging.basicConfig(level=logging.INFO)
     settings = load_settings()
-    agents = load_agents_from_settings(settings)
+    agents = load_agents(settings)
     cli.run_app(build_server(agents, settings))

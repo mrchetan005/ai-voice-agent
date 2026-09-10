@@ -11,8 +11,9 @@ services:
   livekit:
     image: livekit/livekit-server:v1.13.6
     command: --config /etc/livekit.yaml
-    volumes:
-      - ./livekit.yaml:/etc/livekit.yaml:ro
+    configs:
+      - source: livekit_config
+        target: /etc/livekit.yaml
     ports:
       - "7880:7880"           # ws / http
       - "7881:7881"           # rtc tcp fallback
@@ -37,7 +38,9 @@ services:
       POSTGRES_DB: voiceagent
     volumes:
       - pg-data:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    configs:
+      - source: init_sql
+        target: /docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U voiceagent"]
       interval: 5s
@@ -52,7 +55,11 @@ services:
     env_file: ../../.env
     environment:
       LIVEKIT_URL: ws://livekit:7880
-      LIVEKIT_PUBLIC_URL: ws://localhost:7880
+      # Advertised to clients. Use the IPv4 literal, not "localhost": Docker
+      # publishes the port on IPv4 only, and native rtc clients (integration
+      # test, loadtest driver) resolve "localhost" to IPv6 ::1 first and hang.
+      # Browsers dual-stack-fallback so the demo works with either.
+      LIVEKIT_PUBLIC_URL: ws://127.0.0.1:7880
       PLATFORM_DATABASE_URL: postgresql://voiceagent:voiceagent@postgres:5432/voiceagent
       PLATFORM_REDIS_URL: redis://redis:6379/0
       VOICEAGENT_AGENTS_FILE: /app/examples/agents.yaml
@@ -137,3 +144,58 @@ volumes:
   redis-data:
   pg-data:
   minio-data:
+
+# Inline configs are sent via the Docker API — zero host bind mounts, so
+# Docker Desktop drive-sharing issues on Windows can't break the stack.
+# Sources of truth: ./livekit.yaml and ./init.sql (keep in sync).
+configs:
+  livekit_config:
+    content: |
+      # LiveKit server config for LOCAL DEVELOPMENT only.
+      # Single node, no TURN, no external IP discovery, dev credentials.
+      port: 7880
+      rtc:
+        tcp_port: 7881
+        port_range_start: 50100
+        port_range_end: 50160
+        use_external_ip: false
+      keys:
+        # Must match LIVEKIT_API_KEY / LIVEKIT_API_SECRET in .env (secret >= 32 chars).
+        devkey: devsecret_devsecret_devsecret_123456
+      # Shared bus for egress/sip RPC (the compose stack always runs redis).
+      redis:
+        address: redis:6379
+      room:
+        auto_create: true
+      logging:
+        level: info
+        json: false
+  init_sql:
+    content: |
+      -- Platform schema. Applied automatically by the postgres container on first
+      -- boot; apply manually (psql -f) or via the Helm hook Job in Kubernetes.
+      CREATE TABLE IF NOT EXISTS sessions (
+          id            uuid PRIMARY KEY,
+          tenant_id     text NOT NULL DEFAULT 'default',
+          agent_id      text NOT NULL,
+          channel       text NOT NULL DEFAULT 'browser',
+          room          text NOT NULL,
+          user_id       text,
+          started_at    timestamptz NOT NULL DEFAULT now(),
+          ended_at      timestamptz,
+          status        text NOT NULL DEFAULT 'pending',
+          usage         jsonb,
+          cost_usd      numeric,
+          recording_url text
+      );
+      CREATE INDEX IF NOT EXISTS sessions_agent_started ON sessions (agent_id, started_at DESC);
+
+      -- Durable conversation memory (used by the postgres Memory backend).
+      CREATE TABLE IF NOT EXISTS memory_messages (
+          key     text NOT NULL,
+          role    text NOT NULL,
+          content text NOT NULL,
+          ts      double precision NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS memory_messages_key_ts ON memory_messages (key, ts);
+

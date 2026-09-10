@@ -48,6 +48,8 @@ class PlatformSettings(BaseSettings):
     port: int = 8080
     database_url: str = ""
     redis_url: str = ""
+    sip_trunk_id: str = ""  # default outbound SIP trunk for /v1/calls/sip
+    demo_dir: str = "examples/browser-demo"  # served at /demo when it exists
 
 
 class WorkerSettings(BaseSettings):

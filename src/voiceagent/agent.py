@@ -11,7 +11,7 @@ from __future__ import annotations
 import importlib
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from voiceagent.config import (
     AgentConfig,
@@ -25,6 +25,9 @@ from voiceagent.events import EventHandler
 from voiceagent.prompts import PromptConfig, PromptTemplate
 from voiceagent.tools import Tool
 from voiceagent.tools import tool as make_tool
+
+if TYPE_CHECKING:
+    from voiceagent.settings import Settings
 
 
 def _split_provider(value: str) -> tuple[str, str | None]:
@@ -175,6 +178,36 @@ class VoiceAgent:
 
     def __repr__(self) -> str:
         return f"VoiceAgent(name={self.name!r}, mode={self.config.mode!r})"
+
+
+def load_agents(settings: Settings) -> list[VoiceAgent]:
+    """Discover agents from settings: module paths and/or a YAML file.
+
+    Used by both the worker and the platform API so they always agree on
+    which agents exist.
+    """
+    from voiceagent.config import load_agents_yaml
+    from voiceagent.settings import SettingsError
+
+    src = settings.agent_source
+    agents: list[VoiceAgent] = []
+    if src.agents:
+        for path in filter(None, (p.strip() for p in src.agents.split(","))):
+            module_path, _, attr = path.partition(":")
+            if not attr:
+                raise SettingsError(f"VOICEAGENT_AGENTS entry {path!r} must be 'pkg.module:attr'")
+            obj = getattr(importlib.import_module(module_path), attr)
+            if callable(obj) and not isinstance(obj, VoiceAgent):
+                obj = obj()
+            if isinstance(obj, VoiceAgent):
+                agents.append(obj)
+            elif isinstance(obj, list | tuple):
+                agents.extend(obj)
+            else:
+                raise SettingsError(f"{path!r} resolved to {type(obj).__name__}, not VoiceAgent(s)")
+    if src.agents_file:
+        agents.extend(VoiceAgent.from_config(c) for c in load_agents_yaml(src.agents_file))
+    return agents
 
 
 def run(*agents: VoiceAgent) -> None:

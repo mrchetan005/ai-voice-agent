@@ -36,7 +36,13 @@ class Memory(ABC):
         pass
 
 
-def memory_from_config(cfg: MemoryConfig | None) -> Memory | None:
+def memory_from_config(
+    cfg: MemoryConfig | None,
+    *,
+    redis_url: str | None = None,
+    postgres_url: str | None = None,
+) -> Memory | None:
+    """Build a Memory backend; cfg.url wins, else the platform-level URLs."""
     if cfg is None:
         return None
     if cfg.backend == "inmemory":
@@ -46,10 +52,12 @@ def memory_from_config(cfg: MemoryConfig | None) -> Memory | None:
     if cfg.backend == "redis":
         from voiceagent.memory.redis import RedisMemory
 
-        return RedisMemory(url=cfg.url, max_messages=cfg.max_messages, ttl_s=cfg.ttl_s)
+        return RedisMemory(
+            url=cfg.url or redis_url, max_messages=cfg.max_messages, ttl_s=cfg.ttl_s
+        )
     from voiceagent.memory.postgres import PostgresMemory
 
-    return PostgresMemory(dsn=cfg.url, max_messages=cfg.max_messages)
+    return PostgresMemory(dsn=cfg.url or postgres_url, max_messages=cfg.max_messages)
 
 
 __all__ = ["Memory", "Message", "memory_from_config"]

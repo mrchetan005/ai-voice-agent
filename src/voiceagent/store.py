@@ -56,6 +56,15 @@ class StatusStore:
             logger.warning("status read failed for %s: %s", session_id, exc)
             return None
 
+    async def ping(self) -> str:
+        if self._redis is None:
+            return "disabled"
+        try:
+            await self._redis.ping()
+            return "ok"
+        except Exception as exc:
+            return f"error: {exc.__class__.__name__}"
+
     async def aclose(self) -> None:
         if self._redis is not None:
             import contextlib
