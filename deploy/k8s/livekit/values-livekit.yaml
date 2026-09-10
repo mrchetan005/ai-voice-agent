@@ -1,0 +1,40 @@
+# Values for the OFFICIAL LiveKit server chart (cloud-neutral).
+#   helm repo add livekit https://helm.livekit.io
+#   helm upgrade --install livekit livekit/livekit-server \
+#     -n livekit --create-namespace -f values-livekit.yaml
+#
+# We do NOT rebuild what LiveKit ships — this only configures it. Secrets are
+# env-only: the API key/secret come from a pre-created Secret, never inlined.
+
+replicaCount: 2
+
+# API keys: reference an existing Secret (do not inline). Create it with:
+#   kubectl create secret generic livekit-keys -n livekit \
+#     --from-literal=<API_KEY>=<API_SECRET>
+# then set keysFrom to that secret name. The chart mounts it as the keys file.
+keysFrom: livekit-keys
+
+livekit:
+  port: 7880
+  log_level: info
+  rtc:
+    tcp_port: 7881
+    # Discover the node's public IP for ICE (required off-cluster media).
+    use_external_ip: true
+    # UDP media range. Keep in sync with the Service/firewall below. A wide
+    # range needs host networking or a NodePort range; start modest and grow.
+    port_range_start: 50000
+    port_range_end: 50200
+  redis:
+    # Point at an in-cluster Redis (e.g. bitnami/redis) or a managed instance.
+    address: redis-master.livekit.svc.cluster.local:6379
+  turn:
+    # Enable in production for restrictive-NAT clients; needs a real cert + FQDN.
+    enabled: false
+    # domain: turn.example.com
+    # tls_port: 5349
+
+# Cloud-neutral: no provider-specific LoadBalancer annotations. Front LiveKit
+# with your own Ingress/Gateway (or set type: LoadBalancer per cloud).
+loadBalancer:
+  type: disable

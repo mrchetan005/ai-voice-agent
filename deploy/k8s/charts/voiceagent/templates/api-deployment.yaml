@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "voiceagent.fullname" . }}-api
+  labels:
+    {{- include "voiceagent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  {{- if not .Values.api.autoscaling.enabled }}
+  replicas: {{ .Values.api.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "voiceagent.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        {{- include "voiceagent.labels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.api.port | quote }}
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: {{ include "voiceagent.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: api
+          image: {{ include "voiceagent.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["voiceagent-api"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.api.port }}
+          env:
+            - name: PLATFORM_PORT
+              value: {{ .Values.api.port | quote }}
+            - name: LIVEKIT_URL
+              value: {{ .Values.config.livekitUrl | quote }}
+            - name: LIVEKIT_PUBLIC_URL
+              value: {{ .Values.config.livekitPublicUrl | quote }}
+            - name: VOICEAGENT_AGENTS_FILE
+              value: /config/agents.yaml
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.config.otelExporterOtlpEndpoint | quote }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ .Values.config.otelServiceName | quote }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.existingSecret }}
+          volumeMounts:
+            - name: agents
+              mountPath: /config
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+      volumes:
+        - name: agents
+          configMap:
+            name: {{ include "voiceagent.fullname" . }}-agents
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

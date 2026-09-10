@@ -1,0 +1,32 @@
+# Values for the OFFICIAL LiveKit Egress chart (audio recording -> S3/MinIO).
+#   helm upgrade --install egress livekit/egress \
+#     -n livekit -f values-egress.yaml
+#
+# Egress renders/records rooms; we only enable audio-only OGG uploads (see
+# voiceagent.livekit.recording). Storage + API creds come from Secrets.
+
+replicaCount: 1
+
+egress:
+  # LiveKit signaling URL (in-cluster) + shared Redis bus (same as the server).
+  # The upstream chart's Service is "<release>-livekit-server"; egress runs in
+  # the same "livekit" namespace, but the FQDN is unambiguous.
+  ws_url: ws://livekit-livekit-server.livekit.svc.cluster.local:7880
+  redis:
+    address: redis-master.livekit.svc.cluster.local:6379
+  # API key/secret: reference the same Secret the server uses (env-only).
+  keysFrom: livekit-keys
+  # Default S3/MinIO target for uploads. Bucket/keys are supplied per-request by
+  # the worker, but a default here lets ad-hoc egress work too.
+  s3:
+    # For MinIO set endpoint + force_path_style; for AWS S3 omit endpoint.
+    endpoint: ""            # e.g. http://minio.storage.svc.cluster.local:9000
+    region: us-east-1
+    bucket: recordings
+    # access_key / secret via the egress Secret, not inlined here.
+
+# Egress is CPU-heavy even audio-only; give it room and don't co-schedule with
+# workers.
+resources:
+  requests: { cpu: "1", memory: 1Gi }
+  limits: { cpu: "2", memory: 2Gi }

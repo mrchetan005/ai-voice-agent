@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "voiceagent.fullname" . }}-worker
+  labels:
+    {{- include "voiceagent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  {{- if not .Values.worker.autoscaling.enabled }}
+  replicas: {{ .Values.worker.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "voiceagent.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        {{- include "voiceagent.labels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.worker.metricsPort | quote }}
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: {{ include "voiceagent.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # SIGTERM drains in-flight calls: must outlast the worker's own drain so
+      # the kubelet never SIGKILLs a pod mid-call (see plan risk #7).
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      containers:
+        - name: worker
+          image: {{ include "voiceagent.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["voiceagent-worker", "start"]
+          ports:
+            - name: health
+              containerPort: {{ .Values.worker.healthPort }}
+            - name: metrics
+              containerPort: {{ .Values.worker.metricsPort }}
+          env:
+            - name: LIVEKIT_URL
+              value: {{ .Values.config.livekitUrl | quote }}
+            - name: VOICEAGENT_AGENTS_FILE
+              value: /config/agents.yaml
+            - name: WORKER_PROMETHEUS_PORT
+              value: {{ .Values.worker.metricsPort | quote }}
+            - name: WORKER_DRAIN_TIMEOUT_S
+              value: {{ .Values.worker.drainTimeoutSeconds | quote }}
+            # Aggregates per-process metrics from the worker's job subprocesses.
+            - name: PROMETHEUS_MULTIPROC_DIR
+              value: /tmp/prom
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.config.otelExporterOtlpEndpoint | quote }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ .Values.config.otelServiceName | quote }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.existingSecret }}
+          volumeMounts:
+            - name: agents
+              mountPath: /config
+              readOnly: true
+            - name: prom
+              mountPath: /tmp/prom
+          # livekit-agents health server (registered + ready to take jobs).
+          readinessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+      volumes:
+        - name: agents
+          configMap:
+            name: {{ include "voiceagent.fullname" . }}-agents
+        - name: prom
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

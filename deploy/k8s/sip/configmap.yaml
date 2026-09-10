@@ -1,0 +1,24 @@
+# Non-secret LiveKit SIP config. The API key/secret are prepended at pod start
+# from the Secret (see deployment.yaml initContainer) so credentials never live
+# in a ConfigMap.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: voiceagent-sip
+  labels:
+    app.kubernetes.io/name: voiceagent-sip
+    app.kubernetes.io/component: sip
+data:
+  base.yaml: |
+    # Cross-namespace FQDN of the upstream livekit-server chart's Service
+    # (release "livekit" -> Service "livekit-livekit-server" in ns "livekit").
+    ws_url: ws://livekit-livekit-server.livekit.svc.cluster.local:7880
+    redis:
+      address: redis-master.livekit.svc.cluster.local:6379
+    sip_port: 5060
+    # Host networking (see Deployment) lets us bind a large RTP range directly
+    # on the node — required for production SIP media.
+    rtp_port: 10000-20000
+    use_external_ip: true
+    logging:
+      level: info

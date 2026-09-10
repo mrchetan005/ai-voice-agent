@@ -1,0 +1,16 @@
+{{- if .Values.worker.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "voiceagent.fullname" . }}-worker
+  labels:
+    {{- include "voiceagent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  minAvailable: {{ .Values.worker.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "voiceagent.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: worker
+{{- end }}

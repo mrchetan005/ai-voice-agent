@@ -1,0 +1,9 @@
+apiVersion: v2
+name: voiceagent
+description: >-
+  Voice-agent control plane (FastAPI) + homogeneous worker fleet for
+  self-hosted LiveKit. Deploys the platform API and the AgentSession workers;
+  LiveKit server, Egress, and SIP are deployed separately (see deploy/k8s/).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

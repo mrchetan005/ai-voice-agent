@@ -1,0 +1,98 @@
+# voiceagent chart values.
+#
+# Secrets are NEVER stored here. Create a Kubernetes Secret out-of-band and
+# reference it by name via `existingSecret` (see deploy/k8s/README.md). It must
+# hold: LIVEKIT_API_KEY, LIVEKIT_API_SECRET, PLATFORM_API_TOKEN,
+# PLATFORM_DATABASE_URL, PLATFORM_REDIS_URL, plus any provider keys the worker
+# needs (DEEPGRAM_API_KEY, CARTESIA_API_KEY, GOOGLE_API_KEY, OPENAI_API_KEY,
+# ELEVEN_API_KEY) and, if recording is on, the RECORDING_* keys.
+existingSecret: voiceagent-secrets
+
+image:
+  repository: voiceagent
+  tag: ""            # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Non-secret configuration shared by the API and workers.
+config:
+  # In-cluster LiveKit signaling URL. The upstream livekit-server chart names
+  # its Service "<release>-livekit-server" (= livekit-livekit-server for the
+  # README's `helm install livekit`) in the `livekit` namespace, so this must
+  # be the cross-namespace FQDN — a bare "livekit" won't resolve from the
+  # voiceagent namespace. Verify with `kubectl get svc -n livekit` and adjust
+  # if you used a different release name/namespace.
+  livekitUrl: ws://livekit-livekit-server.livekit.svc.cluster.local:7880
+  # Public wss URL browsers/SIP dial into (LiveKit ingress/LB). Empty = same as
+  # livekitUrl.
+  livekitPublicUrl: ""
+  # OpenTelemetry OTLP endpoint (empty disables tracing).
+  otelExporterOtlpEndpoint: ""
+  otelServiceName: voiceagent
+
+# Agent catalogue, rendered into a ConfigMap and mounted at /config/agents.yaml.
+# Override with your own agents. `mock-demo` needs no provider keys.
+agents:
+  agents:
+    - name: mock-demo
+      prompt: { text: "You are a friendly demo agent. Keep replies short." }
+      llm: { provider: mock }
+      stt: { provider: mock }
+      tts: { provider: mock }
+
+api:
+  replicas: 2
+  port: 8080
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { cpu: "1", memory: 1Gi }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  pdb:
+    enabled: true
+    minAvailable: 1
+  service:
+    type: ClusterIP
+    port: 80
+
+worker:
+  replicas: 2
+  # livekit-agents health server (readiness/liveness) + Prometheus scrape.
+  healthPort: 8081
+  metricsPort: 9100
+  # SIGTERM drain: LiveKit stops dispatching and lets live calls finish. Must be
+  # <= terminationGracePeriodSeconds so the pod isn't SIGKILLed mid-call.
+  drainTimeoutSeconds: 600
+  terminationGracePeriodSeconds: 660
+  resources:
+    requests: { cpu: "1", memory: 2Gi }
+    limits: { cpu: "2", memory: 4Gi }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 20
+    # Below the worker's own load_threshold (0.7): a saturated worker
+    # self-marks unavailable and LiveKit stops dispatching to it, so CPU HPA
+    # only needs to add capacity behind that real backpressure (see
+    # deploy/k8s/README.md and plan risk #6).
+    targetCPUUtilizationPercentage: 60
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+# One-shot post-install/upgrade Job that applies the Postgres schema.
+migration:
+  enabled: true
+  image: postgres:16-alpine
+
+serviceAccount:
+  create: true
+  name: ""
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

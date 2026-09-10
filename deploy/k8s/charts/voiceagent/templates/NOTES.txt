@@ -1,0 +1,17 @@
+{{ .Chart.Name }} {{ .Chart.AppVersion }} installed as release {{ .Release.Name }}.
+
+API:    {{ include "voiceagent.fullname" . }}-api  (ClusterIP :{{ .Values.api.service.port }})
+Worker: {{ include "voiceagent.fullname" . }}-worker  (fleet name "voiceagent")
+
+1. Confirm the secret exists (secrets are env-only, never in the chart):
+     kubectl get secret {{ .Values.existingSecret }}
+
+2. Port-forward the API and hit it:
+     kubectl port-forward svc/{{ include "voiceagent.fullname" . }}-api 8080:{{ .Values.api.service.port }}
+     curl localhost:8080/readyz
+
+3. Create a session (needs PLATFORM_API_TOKEN from the secret):
+     curl -XPOST localhost:8080/v1/sessions -H "Authorization: Bearer $TOKEN" \
+       -H 'content-type: application/json' -d '{"agent_id":"mock-demo"}'
+
+LiveKit server, Egress, and SIP are deployed separately — see deploy/k8s/README.md.

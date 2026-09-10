@@ -1,0 +1,74 @@
+{{- if .Values.migration.enabled }}
+# Applies the Postgres schema as a post-install/upgrade Helm hook. Idempotent
+# (CREATE TABLE/INDEX IF NOT EXISTS) — safe to re-run on every upgrade.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "voiceagent.fullname" . }}-schema
+  labels:
+    {{- include "voiceagent.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  init.sql: |
+    CREATE TABLE IF NOT EXISTS sessions (
+        id            uuid PRIMARY KEY,
+        tenant_id     text NOT NULL DEFAULT 'default',
+        agent_id      text NOT NULL,
+        channel       text NOT NULL DEFAULT 'browser',
+        room          text NOT NULL,
+        user_id       text,
+        started_at    timestamptz NOT NULL DEFAULT now(),
+        ended_at      timestamptz,
+        status        text NOT NULL DEFAULT 'pending',
+        usage         jsonb,
+        cost_usd      numeric,
+        recording_url text
+    );
+    CREATE INDEX IF NOT EXISTS sessions_agent_started ON sessions (agent_id, started_at DESC);
+
+    CREATE TABLE IF NOT EXISTS memory_messages (
+        key     text NOT NULL,
+        role    text NOT NULL,
+        content text NOT NULL,
+        ts      double precision NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS memory_messages_key_ts ON memory_messages (key, ts);
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "voiceagent.fullname" . }}-migrate
+  labels:
+    {{- include "voiceagent.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "voiceagent.labels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: {{ .Values.migration.image | quote }}
+          command: ["sh", "-c", "psql \"$PLATFORM_DATABASE_URL\" -v ON_ERROR_STOP=1 -f /schema/init.sql"]
+          envFrom:
+            - secretRef:
+                name: {{ .Values.existingSecret }}
+          volumeMounts:
+            - name: schema
+              mountPath: /schema
+              readOnly: true
+      volumes:
+        - name: schema
+          configMap:
+            name: {{ include "voiceagent.fullname" . }}-schema
+{{- end }}
