@@ -1,17 +1,27 @@
-"""Shared pytest setup. Offline unit tests run by default; live tests
-(real APIs/DB) are opt-in:  uv run --env-file .env pytest -m live"""
+"""Shared test configuration.
 
-import asyncio
-import sys
+Default test runs are 100% offline: no provider keys, no network, no docker.
+- `-m live` tests hit real provider APIs (frugal — credits are limited).
+- `-m integration` tests need the local compose stack (still $0).
+"""
 
-if sys.platform == "win32":
-    # psycopg async cannot run on the default ProactorEventLoop.
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+from __future__ import annotations
 
-# Hermetic settings: pydantic-settings would otherwise read the developer's
-# .env from the CWD, so "token unset" scenarios would depend on what happens
-# to be in that file. Real env VARIABLES still apply — live runs use
-# `uv run --env-file .env pytest -m live`, which exports them properly.
-from whatsapp_agent.config import Settings
+import pytest
 
-Settings.model_config["env_file"] = None
+
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep settings-affecting env vars from leaking into tests."""
+    for var in (
+        "LIVEKIT_URL",
+        "LIVEKIT_API_KEY",
+        "LIVEKIT_API_SECRET",
+        "PLATFORM_API_TOKEN",
+        "PLATFORM_DATABASE_URL",
+        "PLATFORM_REDIS_URL",
+        "VOICEAGENT_AGENTS",
+        "VOICEAGENT_AGENTS_FILE",
+        "RECORDING_ENABLED",
+    ):
+        monkeypatch.delenv(var, raising=False)
